@@ -1,0 +1,34 @@
+DayDream Plus デジタルモザイク　使用している外部ライブラリ
+==========================================================
+
+このアプリは次のオープンソースソフトウェアを利用しています。
+
+■ Qt for Python (PySide6) / Qt 6
+  ライセンス：GNU Lesser General Public License v3 (LGPL-3.0)
+  https://www.qt.io/qt-for-python
+  ※ Qt のライブラリはアプリ本体とは別のファイル（_internal フォルダー内の DLL）として
+    同梱しており、利用者が差し替えることができます。
+  ※ LGPL-3.0 全文：https://www.gnu.org/licenses/lgpl-3.0.html
+
+■ Pillow
+  ライセンス：MIT-CMU License (HPND)
+  https://python-pillow.org
+
+■ NumPy
+  ライセンス：BSD 3-Clause License
+  https://numpy.org
+
+■ regex (mrab-regex)
+  ライセンス：Apache License 2.0
+  https://github.com/mrabarnett/mrab-regex
+
+■ Python
+  ライセンス：Python Software Foundation License
+  https://www.python.org
+
+■ PyInstaller（アプリの作成に使用）
+  ライセンス：GPL-2.0 with Bootloader Exception（作成したアプリの配布に制限はありません）
+  https://pyinstaller.org
+
+■ Inno Setup（インストーラーの作成に使用）
+  https://jrsoftware.org/isinfo.php

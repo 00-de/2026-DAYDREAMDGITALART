@@ -5,7 +5,11 @@
 
 APP_NAME = "DayDream Plus デジタルモザイク"
 APP_ID = "DayDreamPlusDigitalMosaic"
-APP_VERSION = "0.1.0"  # フェーズ1
+# バージョン番号は app/version.py で管理（自動バージョンアップ）
+
+# ---- 自動更新 ----
+SETUP_ASSET_NAME = "DayDreamPlusDigitalMosaic_Setup.exe"
+UPDATE_CHECK_TIMEOUT = 8  # 秒。オフラインでもすぐあきらめて普段どおり使える
 
 # ---- 写真コレクション ----
 MAX_TILE_PHOTOS = 2000

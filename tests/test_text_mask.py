@@ -49,6 +49,8 @@ class CountTest(unittest.TestCase):
 class MaskTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if not tm.find_japanese_fonts():
+            raise unittest.SkipTest("この環境には日本語フォントがありません")
         cls.font = tm.default_font()
 
     def _check_fits(self, r, settings):

@@ -1,0 +1,15 @@
+# Python が自動で作るファイル
+__pycache__/
+*.pyc
+
+# EXE・インストーラーの作成で生まれるフォルダー（GitHub上で毎回作り直す）
+build/
+dist/
+dist_installer/
+
+# 自動ビルド時に生成されるバージョン情報
+app/_build_info.py
+
+# テスト・診断の結果
+selftest_*.json
+*.log
