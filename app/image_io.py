@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,8 +61,12 @@ def load_image(
     path: str | os.PathLike,
     max_side: int | None = None,
     alpha_background: tuple[int, int, int] = config.DEFAULT_ALPHA_BACKGROUND,
+    data: bytes | None = None,
 ) -> LoadedImage:
     """画像を1枚読み込んで RGB で返す。
+
+    data にファイルの中身（バイト列）を渡すと、ディスクを読み直さずにそれを使う
+    （重複チェック用の指紋計算と画像の読み込みを、1回のファイル読み込みで済ませるため）。
 
     max_side を指定すると、長辺がその長さ以下になるよう縮小して返す
     （タイル解析やサムネイル用。メモリ節約になる）。
@@ -70,7 +75,10 @@ def load_image(
     p = Path(path)
     name = p.name
 
-    if not p.is_file():
+    def source():
+        return io.BytesIO(data) if data is not None else p
+
+    if data is None and not p.is_file():
         raise ImageLoadError(
             f"ファイルが見つかりません：{name}",
             "ファイルが移動・削除されていないか確認してください。",
@@ -78,7 +86,7 @@ def load_image(
 
     try:
         # ① 中身の検査（verify はデータの整合性だけを調べ、画素は展開しない）
-        with Image.open(p) as probe:
+        with Image.open(source()) as probe:
             fmt = probe.format
             width, height = probe.size
             if fmt not in config.ACCEPTED_FORMATS:
@@ -94,7 +102,7 @@ def load_image(
             probe.verify()
 
         # ② verify 後は同じオブジェクトが使えないため開き直して本読み込み
-        with Image.open(p) as img:
+        with Image.open(source()) as img:
             # 縮小読み込みで画素数が変わる前に「元のサイズ」を記録（EXIFで縦横が入れ替わる場合も考慮）
             orientation = img.getexif().get(0x0112, 1)
             original_size = (height, width) if orientation in (5, 6, 7, 8) else (width, height)

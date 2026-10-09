@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from PIL import Image
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QImage, QPainter, QPixmap, QWheelEvent
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView
 
 
@@ -80,6 +80,6 @@ class PreviewView(QGraphicsView):
         if not self.has_image():
             painter.save()
             painter.resetTransform()
-            painter.setPen(self.palette().placeholderText().color())
+            painter.setPen(QColor("#C9C2DE"))  # 暗い背景でも読める明るい色
             painter.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter, self._placeholder)
             painter.restore()

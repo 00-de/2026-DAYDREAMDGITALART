@@ -22,6 +22,7 @@ from .. import config, image_io, paths, text_mask, updater
 from ..errors import MosaicError
 from ..version import VERSION
 from . import workers
+from .collection_view import CollectionPanel
 from .preview import PreviewView
 from .style import STYLESHEET
 
@@ -106,6 +107,9 @@ class MainWindow(QMainWindow):
         self._text_timer.timeout.connect(self._render_text_preview)
 
         self._load_fonts()
+        self.setAcceptDrops(True)
+        if check_updates_on_start:  # 前回使った写真を自動で読み込む（解析結果の保存庫があるので速い）
+            QTimer.singleShot(600, self.collection_panel.restore_previous)
         self._update_photo_summary()
         self._on_mode_changed(self.mode_tabs.currentIndex())
 
@@ -120,8 +124,11 @@ class MainWindow(QMainWindow):
         a = QAction("メイン写真を選択…", self, shortcut=QKeySequence("Ctrl+O"))
         a.triggered.connect(self.choose_main_photo)
         m_file.addAction(a)
-        a = QAction("タイル用写真フォルダーを選択…", self, shortcut=QKeySequence("Ctrl+Shift+O"))
-        a.triggered.connect(self.choose_folder)
+        a = QAction("タイル用写真のフォルダーを追加…", self, shortcut=QKeySequence("Ctrl+Shift+O"))
+        a.triggered.connect(lambda: self.collection_panel.choose_folder())
+        m_file.addAction(a)
+        a = QAction("タイル用の写真ファイルを追加…", self, shortcut=QKeySequence("Ctrl+Shift+I"))
+        a.triggered.connect(lambda: self.collection_panel.choose_files())
         m_file.addAction(a)
         m_file.addSeparator()
         a = QAction("終了", self, shortcut=QKeySequence("Ctrl+Q"))
@@ -157,7 +164,9 @@ class MainWindow(QMainWindow):
         root.addLayout(head)
 
         # ---- ① 写真コレクション ----
-        root.addWidget(self._build_collection_box())
+        self.collection_panel = CollectionPanel(self.settings)
+        self.collection_panel.message.connect(lambda t, ms: self.statusBar().showMessage(t, ms))
+        root.addWidget(self.collection_panel)
 
         # ---- ② 設定 ＋ ③ プレビュー ----
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -183,23 +192,6 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_bottom_bar())
         self.setCentralWidget(central)
         self.statusBar().showMessage("準備ができました。")
-
-    def _build_collection_box(self) -> QGroupBox:
-        box = QGroupBox("① 写真コレクション（タイルに使う写真・最大2,000枚）")
-        lay = QHBoxLayout(box)
-        self.btn_folder = QPushButton("📁 タイル用写真フォルダーを選択")
-        self.btn_folder.clicked.connect(self.choose_folder)
-        self.chk_recursive = QCheckBox("サブフォルダーも含める")
-        self.lbl_folder = QLabel("まだ選ばれていません")
-        self.lbl_folder.setObjectName("hint")
-        self.lbl_folder.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.lbl_count = QLabel("")
-        self.lbl_count.setObjectName("summary")
-        lay.addWidget(self.btn_folder)
-        lay.addWidget(self.chk_recursive)
-        lay.addWidget(self.lbl_folder, 1)
-        lay.addWidget(self.lbl_count)
-        return box
 
     # ---------------- 写真モザイク ----------------
     def _build_photo_tab(self) -> QWidget:
@@ -416,46 +408,6 @@ class MainWindow(QMainWindow):
         return w
 
     # ==================================================================
-    # 写真コレクション
-    # ==================================================================
-    def choose_folder(self) -> None:
-        start = self.settings.value("paths/folder", str(Path.home() / "Pictures"))
-        d = QFileDialog.getExistingDirectory(self, "タイル用写真フォルダーを選択", start)
-        if not d:
-            return
-        self.settings.setValue("paths/folder", d)
-        self.lbl_folder.setText(d)
-        self.lbl_folder.setToolTip(d)
-        self.lbl_count.setText("数えています…")
-        recursive = self.chk_recursive.isChecked()
-
-        def count():
-            files = []
-            for f in image_io.iter_candidate_files(d, recursive=recursive):
-                files.append(f)
-                if len(files) > config.MAX_TILE_PHOTOS:
-                    break
-            return files
-
-        self._run(count, self._on_folder_counted)
-
-    def _on_folder_counted(self, files: list) -> None:
-        n = len(files)
-        if n == 0:
-            self.lbl_count.setText("写真が見つかりません")
-            QMessageBox.information(self, "写真が見つかりません",
-                                    "このフォルダーには JPG・JPEG・JFIF・PNG の写真がありません。\n"
-                                    "別のフォルダーを選ぶか、「サブフォルダーも含める」をオンにしてください。")
-            return
-        over = n > config.MAX_TILE_PHOTOS
-        shown = min(n, config.MAX_TILE_PHOTOS)
-        self.lbl_count.setText(f"候補 {shown:,}枚" + ("（上限）" if over else ""))
-        msg = f"写真の候補が {shown:,}枚見つかりました。"
-        if over:
-            msg += f" 上限の{config.MAX_TILE_PHOTOS:,}枚までを使います。"
-        self.statusBar().showMessage(msg + "（写真の検査・色の解析は次の更新で追加されます）", 10000)
-
-    # ==================================================================
     # 写真モザイク
     # ==================================================================
     def choose_main_photo(self) -> None:
@@ -465,6 +417,9 @@ class MainWindow(QMainWindow):
         if not f:
             return
         self.settings.setValue("paths/main_photo_dir", str(Path(f).parent))
+        self.load_main_photo(f)
+
+    def load_main_photo(self, f: str) -> None:
         self.mode_tabs.setCurrentIndex(0)
         self.lbl_main.setText("読み込み中…")
         self._run(lambda: image_io.load_image(f, max_side=PREVIEW_MAX), self._on_main_loaded)
@@ -668,7 +623,7 @@ class MainWindow(QMainWindow):
                 self.lbl_preview_info.setText("生成前：メイン写真")
             else:
                 self.preview.set_image(None)
-                self.preview.set_placeholder("「メイン写真を選択」で、再現したい写真を選んでください")
+                self.preview.set_placeholder("「メイン写真を選択」を押すか、ここに写真を1枚ドラッグしてください")
                 self.lbl_preview_info.setText("")
             self._update_photo_summary()
         else:
@@ -742,10 +697,41 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("設定を初期化しました。", 5000)
 
     def closeEvent(self, e) -> None:
+        if self.collection_panel.is_busy():
+            self.collection_panel.cancel()  # 読み込み中に閉じても安全に止める
         self._save_settings()
         for w in list(self._active_workers):
             w.cancel()
         super().closeEvent(e)
+
+    # ==================================================================
+    # ドラッグ＆ドロップ
+    # ==================================================================
+    @staticmethod
+    def _local_paths(mime) -> list[str]:
+        return [u.toLocalFile() for u in mime.urls() if u.isLocalFile()] if mime.hasUrls() else []
+
+    def dragEnterEvent(self, e) -> None:
+        if self._local_paths(e.mimeData()):
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e) -> None:
+        if self._local_paths(e.mimeData()):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e) -> None:
+        items = self._local_paths(e.mimeData())
+        if not items:
+            return
+        e.acceptProposedAction()
+        # 写真モザイクのプレビュー欄に写真を1枚落とした → メイン写真にする
+        over_preview = self.preview.rect().contains(self.preview.mapFrom(self, e.position().toPoint()))
+        if (over_preview and self.mode_tabs.currentIndex() == 0 and len(items) == 1
+                and Path(items[0]).is_file()
+                and Path(items[0]).suffix.lower() in config.CANDIDATE_EXTENSIONS):
+            self.load_main_photo(items[0])
+            return
+        self.collection_panel.add_sources(items)
 
     # ==================================================================
     # 自動更新
