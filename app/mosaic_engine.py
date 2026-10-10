@@ -365,40 +365,37 @@ def generate_photo_mosaic(main_photo_path: str, records: list[PhotoRecord], s: P
 # --------------------------------------------------------------------------
 # 文字モザイク
 # --------------------------------------------------------------------------
-def generate_text_mosaic(text: str, mask_settings: text_mask.TextMaskSettings, records: list[PhotoRecord],
-                         s: TextMosaicSettings, progress: Progress | None = None,
-                         is_cancelled: Cancelled | None = None) -> MosaicResult:
-    t0 = time.time()
+@dataclass
+class TextLayout:
+    """文字モザイクの配置（どの升目にどの写真を、どの色寄せで置くか）。静止画とアニメーションで共通。"""
+    cols: int
+    rows: int
+    assign: np.ndarray        # 写真の番号（-1 は単色）
+    is_text: np.ndarray       # 文字の升目か
+    tint_rgb: np.ndarray      # 寄せる色
+    tint_alpha: np.ndarray    # 寄せる強さ
+    solid: np.ndarray         # 写真がないときの色
+    used_kinds: int
+    mask_result: object
+    warnings: list[str]
+
+
+def build_text_layout(text: str, mask_settings: text_mask.TextMaskSettings, records: list[PhotoRecord],
+                      s: TextMosaicSettings) -> TextLayout:
     if not records:
         raise MosaicError("タイル用の写真が登録されていません。", "① 写真コレクションに写真を追加してください。")
-    W, H = s.cols * s.tile_px, s.rows * s.tile_px
-    check_output_size(W, H)
-    TOTAL = 1000
-    report = progress or (lambda d, t: None)
-    warnings: list[str] = []
-
     res = text_mask.render_text_mask(text, mask_settings)
-    warnings.extend(res.warnings)
     cov = text_mask.mask_coverage(res.mask, s.cols, s.rows).reshape(-1)
     is_text = cov >= s.threshold
     text_cells = np.where(is_text)[0]
     bg_cells = np.where(~is_text)[0]
     if len(text_cells) == 0:
         raise MosaicError("文字の部分にタイルがありません。", "タイルの数を増やすか、文字を太くしてください。")
-    report(100, TOTAL)
-
     bg_lab = srgb_to_lab(np.array(s.bg_color, dtype=np.float64))
     rng = np.random.default_rng(s.seed)
     assign, used_kinds = assign_text_tiles(text_cells, bg_cells, records, s.cols, s.rows,
                                            float(bg_lab[0]), s.bg_photos, rng)
     n_cells = s.cols * s.rows
-    report(200, TOTAL)
-
-    used = sorted(set(assign[assign >= 0].tolist()))
-    tiles, failed = _load_tiles(records, used, s.tile_px, report, is_cancelled, 200, 400, TOTAL)
-    if failed:
-        warnings.append(f"{len(failed)}枚の写真が読み込めなかったため、その部分は文字色で塗りました。")
-
     text_rgb = np.array(s.text_color, dtype=np.float32)
     bg_rgb = np.array(s.bg_color, dtype=np.float32)
     tint_rgb = np.where(is_text[:, None], text_rgb[None, :], bg_rgb[None, :]).astype(np.float32)
@@ -411,7 +408,29 @@ def generate_text_mosaic(text: str, mask_settings: text_mask.TextMaskSettings, r
         tint_alpha[i] = 0.12 if diff >= 40 else 0.12 + (40 - diff) / 40 * 0.38
     if s.bg_photos:
         tint_alpha[bg_cells] = 0.72  # 背景の写真は背景色に強く寄せて、文字を目立たせる
-    out = _compose(assign, s.cols, s.rows, s.tile_px, tiles, tint_rgb, tint_alpha, solid,
+    return TextLayout(s.cols, s.rows, assign, is_text, tint_rgb, tint_alpha, solid, used_kinds, res,
+                      list(res.warnings))
+
+
+def generate_text_mosaic(text: str, mask_settings: text_mask.TextMaskSettings, records: list[PhotoRecord],
+                         s: TextMosaicSettings, progress: Progress | None = None,
+                         is_cancelled: Cancelled | None = None) -> MosaicResult:
+    t0 = time.time()
+    W, H = s.cols * s.tile_px, s.rows * s.tile_px
+    check_output_size(W, H)
+    TOTAL = 1000
+    report = progress or (lambda d, t: None)
+    lay = build_text_layout(text, mask_settings, records, s)
+    res, assign, warnings = lay.mask_result, lay.assign, list(lay.warnings)
+    text_cells = np.where(lay.is_text)[0]
+    used_kinds, n_cells = lay.used_kinds, s.cols * s.rows
+    report(200, TOTAL)
+
+    used = sorted(set(assign[assign >= 0].tolist()))
+    tiles, failed = _load_tiles(records, used, s.tile_px, report, is_cancelled, 200, 400, TOTAL)
+    if failed:
+        warnings.append(f"{len(failed)}枚の写真が読み込めなかったため、その部分は文字色で塗りました。")
+    out = _compose(assign, s.cols, s.rows, s.tile_px, tiles, lay.tint_rgb, lay.tint_alpha, lay.solid,
                    report, is_cancelled, 600, 350, TOTAL)
     del tiles
     report(980, TOTAL)

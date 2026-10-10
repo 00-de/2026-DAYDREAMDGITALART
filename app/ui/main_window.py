@@ -18,12 +18,13 @@ from PySide6.QtWidgets import (
     QSpinBox, QSplitter, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from .. import config, exporter, image_io, mosaic_engine, paths, text_mask, updater
+from .. import animation, config, exporter, image_io, mosaic_engine, paths, text_mask, updater, video_export
 from ..errors import MosaicError
 from ..version import VERSION
 from . import workers
 from .collection_view import CollectionPanel
 from .preview import PreviewView
+from .animation_dialog import AnimationExportDialog
 from .save_dialog import SaveDialog
 from .style import STYLESHEET
 
@@ -102,6 +103,12 @@ class MainWindow(QMainWindow):
         self._result: mosaic_engine.MosaicResult | None = None   # 最後に生成したモザイク
         self._result_mode = -1
         self._gen_worker: workers.Worker | None = None
+        self._anim_renderer: animation.AnimationRenderer | None = None
+        self._anim_key = None
+        self._anim_frame = 0
+        self._anim_timer = QTimer(self)
+        self._anim_timer.timeout.connect(self._anim_tick)
+        self._anim_busy = False
 
         self._text_timer = QTimer(self, singleShot=True, interval=350)
         self._text_timer.timeout.connect(self._render_text_preview)
@@ -345,6 +352,52 @@ class MainWindow(QMainWindow):
         f4.addRow("タイル1枚の大きさ", self.sp_text_tile)
         v.addWidget(g4)
 
+        # ---- 🎬 文字が集まるアニメーション ----
+        g5 = QGroupBox("🎬 写真が集まって文字になるアニメーション（200種類）")
+        f5 = QFormLayout(g5)
+        row5 = QHBoxLayout()
+        self.cb_anim = QComboBox()
+        self.cb_anim.addItems([p.name for p in animation.PRESETS])
+        self.cb_anim.setMaxVisibleItems(20)
+        # 長い名前でも欄が横に広がりすぎないようにする（一覧を開くと全文が見える）
+        self.cb_anim.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.cb_anim.setMinimumContentsLength(16)
+        self.cb_anim.view().setMinimumWidth(420)
+        self.btn_anim_random = QPushButton("🎲 おまかせ")
+        self.btn_anim_random.setToolTip("200種類の中からランダムに選びます")
+        self.btn_anim_random.clicked.connect(self._random_animation)
+        row5.addWidget(self.cb_anim, 1)
+        row5.addWidget(self.btn_anim_random)
+        f5.addRow("動き方", row5)
+        self.cb_anim_size = QComboBox()
+        for label, wh in (("1080×1920（縦・ショート動画）", (1080, 1920)), ("720×1280（縦・軽量）", (720, 1280)),
+                          ("1920×1080（横・YouTube）", (1920, 1080)), ("1080×1080（正方形・Instagram）", (1080, 1080))):
+            self.cb_anim_size.addItem(label, wh)
+        f5.addRow("動画の大きさ", self.cb_anim_size)
+        row6 = QHBoxLayout()
+        self.sp_anim_sec = _spin(2, 20, 5, " 秒")
+        self.sp_anim_hold = _spin(0, 10, 2, " 秒")
+        row6.addWidget(self.sp_anim_sec)
+        row6.addWidget(QLabel("　完成後に止める"))
+        row6.addWidget(self.sp_anim_hold)
+        row6.addStretch(1)
+        f5.addRow("集まる時間", row6)
+        self.cb_anim_fps = QComboBox()
+        self.cb_anim_fps.addItem("30 fps（標準）", 30)
+        self.cb_anim_fps.addItem("60 fps（なめらか）", 60)
+        f5.addRow("なめらかさ", self.cb_anim_fps)
+        row7 = QHBoxLayout()
+        self.btn_anim_play = QPushButton("▶ プレビュー再生")
+        self.btn_anim_play.clicked.connect(self.toggle_animation_preview)
+        self.btn_anim_export = QPushButton("🎞 動画を書き出す")
+        self.btn_anim_export.setToolTip("MP4 動画・GIF アニメ・PNG 連番から選べます")
+        self.btn_anim_export.clicked.connect(self.export_animation)
+        row7.addWidget(self.btn_anim_play)
+        row7.addWidget(self.btn_anim_export, 1)
+        f5.addRow(row7)
+        f5.addRow(_hint("文字・フォント・色・背景は上の設定がそのまま使われます。\nタイルの細かさは動画の大きさに合わせて自動で決まります。"))
+        v.addWidget(g5)
+
         self.lbl_text_warn = QLabel("", objectName="warn")
         self.lbl_text_warn.setWordWrap(True)
         v.addWidget(self.lbl_text_warn)
@@ -575,11 +628,7 @@ class MainWindow(QMainWindow):
         res = text_mask.render_text_mask(text, settings)
         cw, ch = res.mask.size
         if auto_tiles:
-            cols, rows = text_mask.grid_size_for(res.mask.size, text_mask.recommend_tile_px(res))
-            short = min(cols, rows)
-            if short < MIN_GRID_SHORT_SIDE:
-                k = MIN_GRID_SHORT_SIDE / short
-                cols, rows = round(cols * k), round(rows * k)
+            cols, rows = text_mask.auto_grid(res)
         else:
             cols = manual_cols
             rows = max(1, round(cols * ch / cw))
@@ -638,6 +687,9 @@ class MainWindow(QMainWindow):
     # モード切り替え・設定の保存
     # ==================================================================
     def _on_mode_changed(self, idx: int) -> None:
+        if hasattr(self, "_anim_timer") and self._anim_timer.isActive():
+            self._anim_timer.stop()
+            self._set_anim_buttons()
         self.tb_before.setChecked(True)
         self.tb_after.setEnabled(self._result is not None and self._result_mode == idx)
         self.btn_save.setEnabled(self._result is not None and self._result_mode == idx)
@@ -726,6 +778,7 @@ class MainWindow(QMainWindow):
             self.collection_panel.cancel()  # 読み込み中に閉じても安全に止める
         if self._gen_worker:
             self._gen_worker.cancel()
+        self._anim_timer.stop()
         QApplication.instance().removeEventFilter(self)
         self._save_settings()
         for w in list(self._active_workers):
@@ -888,6 +941,179 @@ class MainWindow(QMainWindow):
             self._show_error(e)
 
         self._run(lambda: exporter.save_image(img, opts, protected, settings), done, on_error=failed)
+
+    # ==================================================================
+    # 🎬 アニメーション
+    # ==================================================================
+    def _random_animation(self) -> None:
+        import random
+        self.cb_anim.setCurrentIndex(random.randrange(len(animation.PRESETS)))
+
+    def _anim_settings(self, seed: int = 1) -> tuple:
+        w, h = self.cb_anim_size.currentData()
+        st = animation.AnimationSettings(width=w, height=h, fps=self.cb_anim_fps.currentData(),
+                                         duration=float(self.sp_anim_sec.value()),
+                                         hold=float(self.sp_anim_hold.value()),
+                                         preset=self.cb_anim.currentIndex(), seed=seed)
+        ms = self._text_settings()
+        text = self.ed_text.toPlainText()
+        key = (text, w, h, ms.font.path if ms.font else "", ms.weight, ms.letter_spacing, ms.line_spacing,
+               ms.multiline, ms.font_size, self._text_color.name(), self._bg_color.name(),
+               self.rb_bg_photo.isChecked(), len(self.collection_panel.collection),
+               tuple(r.sha1 for r in self.collection_panel.collection.records[:50]))
+        return text, ms, st, key
+
+    def _with_renderer(self, then) -> None:
+        """アニメーション係を用意してから then(renderer) を呼ぶ（写真の読み込みは作業係で）。"""
+        reason = self._generate_blocker() if self.mode_tabs.currentIndex() == 1 else ""
+        if reason and reason != "生成中です":
+            QMessageBox.information(self, "アニメーション", reason)
+            return
+        text, ms, st, key = self._anim_settings()
+        if self._anim_renderer is not None and self._anim_key == key:
+            # 文字・写真・動画サイズが同じなら、写真を読み直さずに動き方・長さだけ反映
+            self._anim_renderer = self._anim_renderer.with_settings(st)
+            then(self._anim_renderer)
+            return
+        records = list(self.collection_panel.collection.records)
+        text_rgb, bg_rgb = self._text_color.getRgb()[:3], self._bg_color.getRgb()[:3]
+        bg_photos = self.rb_bg_photo.isChecked()
+        self._anim_busy = True
+        self._set_anim_buttons()
+        self.statusBar().showMessage("アニメーションの準備をしています（写真を読み込み中）…")
+
+        def build(progress=None, is_cancelled=None):
+            return animation.build_renderer(text, ms, records, text_rgb, bg_rgb, bg_photos, st,
+                                            progress, is_cancelled)
+
+        w = workers.Worker(build, with_progress=True)
+        w.signals.progress.connect(lambda d, t: self.statusBar().showMessage(
+            f"アニメーションの準備をしています… {int(d * 100 / max(1, t))}%"))
+
+        def done(r):
+            self._anim_busy = False
+            self._anim_renderer, self._anim_key = r, key
+            self._set_anim_buttons()
+            self.statusBar().clearMessage()
+            then(r)
+
+        def failed(e):
+            self._anim_busy = False
+            self._set_anim_buttons()
+            self._show_error(e)
+
+        self._track(w, done, failed)
+        workers.start(w)
+
+    def _set_anim_buttons(self) -> None:
+        playing = self._anim_timer.isActive()
+        self.btn_anim_play.setText("⏹ 停止" if playing else "▶ プレビュー再生")
+        self.btn_anim_play.setEnabled(not self._anim_busy)
+        self.btn_anim_export.setEnabled(not self._anim_busy and not playing)
+
+    def toggle_animation_preview(self) -> None:
+        if self._anim_timer.isActive():
+            self.stop_animation_preview()
+            return
+
+        def start(r):
+            self._anim_frame = 0
+            self.tb_before.setChecked(False)
+            self.tb_after.setChecked(False)
+            self._anim_timer.start(int(1000 / r.st.fps))
+            self.lbl_preview_info.setText(f"アニメーション：{r.preset.name}")
+            self._set_anim_buttons()
+
+        self._with_renderer(start)
+
+    def stop_animation_preview(self) -> None:
+        self._anim_timer.stop()
+        self._set_anim_buttons()
+        self._show_before()
+
+    def _anim_tick(self) -> None:
+        r = self._anim_renderer
+        if r is None or self.mode_tabs.currentIndex() != 1:
+            self.stop_animation_preview()
+            return
+        vp = self.preview.viewport().size()
+        scale = min(1.0, max(0.15, min(vp.width() / r.W, vp.height() / r.H)))
+        self.preview.set_qimage(r.frame(self._anim_frame, scale))
+        self._anim_frame = (self._anim_frame + 1) % r.frame_count  # 最後まで行ったら最初から繰り返す
+
+    def export_animation(self) -> None:
+        if self._anim_timer.isActive():
+            self.stop_animation_preview()
+        dlg = AnimationExportDialog(self.settings, video_export.mp4_codec_name(), self)
+        if dlg.exec() != AnimationExportDialog.DialogCode.Accepted:
+            return
+        fmt, path = dlg.result_format, dlg.result_path
+        self._with_renderer(lambda r: self._run_export(r, fmt, path))
+
+    def _run_export(self, r: animation.AnimationRenderer, fmt: str, path: str) -> None:
+        prog = QProgressDialog("動画を書き出しています…", "中止", 0, 1000, self)
+        prog.setWindowTitle("動画の書き出し")
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.setValue(0)
+        cancelled = {"v": False}
+        prog.canceled.connect(lambda: cancelled.update(v=True))
+
+        def report(d, t):
+            prog.setValue(int(d * 1000 / max(1, t)))
+
+        def finished(msg: str, folder: str):
+            prog.reset()
+            box = QMessageBox(self)
+            box.setWindowTitle("書き出しました")
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText(msg)
+            b_open = box.addButton("フォルダーを開く", QMessageBox.ButtonRole.ActionRole)
+            box.addButton("閉じる", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is b_open:
+                from PySide6.QtCore import QUrl
+                from PySide6.QtGui import QDesktopServices
+                QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
+        def failed(e):
+            prog.reset()
+            if isinstance(e, video_export.ExportCancelled):
+                self.statusBar().showMessage("書き出しを中止しました。", 6000)
+            else:
+                self._show_error(e)
+
+        secs = r.frame_count / r.st.fps
+        if fmt == "mp4":  # 動画機能は画面と同じスレッドで動かす（進み具合は表示される）
+            try:
+                out, codec = video_export.export_mp4(r, path, report, lambda: cancelled["v"])
+            except Exception as e:
+                failed(e)
+                return
+            size = Path(out).stat().st_size / 1e6
+            finished(f"MP4 動画を書き出しました。\n\n保存先：{out}\n大きさ：{r.W}×{r.H}・{secs:.1f}秒・{size:.1f}MB\n"
+                     f"圧縮方式：{codec}\n動き方：{r.preset.name}", str(Path(out).parent))
+            return
+
+        if fmt == "gif":
+            fn = lambda progress=None, is_cancelled=None: video_export.export_gif(r, path, progress=progress, is_cancelled=is_cancelled)  # noqa: E731
+        else:
+            fn = lambda progress=None, is_cancelled=None: video_export.export_png_sequence(r, path, progress, is_cancelled)  # noqa: E731
+        w = workers.Worker(fn, with_progress=True)
+        w.signals.progress.connect(report)
+        prog.canceled.connect(w.cancel)
+
+        def done(res):
+            if fmt == "gif":
+                finished(f"GIF アニメを書き出しました。\n\n保存先：{res}\n大きさ：{Path(res).stat().st_size / 1e6:.1f}MB\n"
+                         f"動き方：{r.preset.name}", str(Path(res).parent))
+            else:
+                folder, n = res
+                finished(f"PNG連番を書き出しました（{n}枚・{r.st.fps}fps）。\n\n保存先：{folder}\n"
+                         "動画編集ソフトで「画像シーケンス」として読み込めます。", folder)
+
+        self._track(w, done, failed)
+        workers.start(w)
 
     # ==================================================================
     # ドラッグ＆ドロップ

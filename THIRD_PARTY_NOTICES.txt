@@ -10,6 +10,12 @@ DayDream Plus デジタルモザイク　使用している外部ライブラリ
     同梱しており、利用者が差し替えることができます。
   ※ LGPL-3.0 全文：https://www.gnu.org/licenses/lgpl-3.0.html
 
+■ Qt Multimedia（動画の書き出しに使用）／ FFmpeg（Qt に同梱の LGPL 版）
+  ライセンス：LGPL-3.0（Qt Multimedia）、LGPL-2.1 以降（FFmpeg）
+  https://www.qt.io/ ／ https://ffmpeg.org/
+  ※ GPL の部品（x264 など）は含みません。Windows では OS 標準の H.264 エンコーダー
+    （Media Foundation）を利用します。ライブラリは _internal フォルダー内に別ファイルとして同梱しています。
+
 ■ Pillow
   ライセンス：MIT-CMU License (HPND)
   https://python-pillow.org

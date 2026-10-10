@@ -74,6 +74,30 @@ def run(result_path: str) -> int:
         win.close()
         app.processEvents()
 
+        # 4) 集合アニメーション → MP4（どの圧縮方式が使えるかを記録。失敗しても GIF／PNG は使える）
+        try:
+            from . import animation, video_export
+            if fonts:
+                with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d2:
+                    d2 = Path(d2)
+                    tiles2 = d2 / "t"
+                    tiles2.mkdir()
+                    for i in range(8):
+                        Image.new("RGB", (30, 30), (200, 100 + i * 15, 255)).save(tiles2 / f"{i}.jpg", "JPEG")
+                    c2 = collection.AnalysisCache(d2 / "c.sqlite")
+                    recs2 = collection.analyze_sources([str(tiles2)], cache=c2).records
+                    c2.close()
+                    st = animation.AnimationSettings(width=180, height=320, fps=10, duration=1, hold=0.2, preset=42)
+                    r = animation.build_renderer("DD", text_mask.TextMaskSettings(), recs2, (255, 255, 255),
+                                                 (20, 20, 40), False, st)
+                    path, codec = video_export.export_mp4(r, str(d2 / "a"))
+                    checks["animation_presets"] = len(animation.PRESETS)
+                    checks["mp4"] = f"{codec} ({Path(path).stat().st_size} bytes)"
+            else:
+                checks["mp4"] = "skipped: no Japanese font"
+        except Exception as e:  # MP4 が作れなくてもアプリ自体は使えるので、記録だけする
+            checks["mp4"] = f"error: {e}"
+
         report["ok"] = (checks["image_io"] is True and checks["mosaic"] is True and checks["gui"] is True
                         and checks["text_mask"] is not False)
     except Exception:

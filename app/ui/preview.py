@@ -46,6 +46,15 @@ class PreviewView(QGraphicsView):
         if self._fit or not keep_zoom:
             self.fit()
 
+    def set_qimage(self, img: QImage) -> None:
+        """アニメーション再生用：QImage をそのまま表示する（変換を省いて軽くする）。"""
+        first = not self.has_image() or self._item.pixmap().size() != img.size()
+        self._item.setPixmap(QPixmap.fromImage(img))
+        if first:
+            self.scene().setSceneRect(self._item.boundingRect())
+            if self._fit:
+                self.fit()
+
     def set_placeholder(self, text: str) -> None:
         self._placeholder = text
         self.viewport().update()

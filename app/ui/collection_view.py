@@ -6,12 +6,14 @@ from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, QSettings, QSize, Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QAction, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QGroupBox, QHBoxLayout,
+    QAbstractItemView, QCheckBox, QDialog, QMenu, QDialogButtonBox, QFileDialog, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QListView, QListWidget, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
 )
+
+from PySide6.QtWidgets import QWidget as QWidget_
 
 from .. import collection as col
 from .. import config
@@ -84,15 +86,39 @@ def _thumb_view(model: ThumbModel, strip: bool) -> QListView:
 
 
 class CollectionDetailDialog(QDialog):
-    def __init__(self, collection: col.PhotoCollection, parent=None):
+    def __init__(self, collection: col.PhotoCollection, parent=None, on_remove=None):
         super().__init__(parent)
         self.setWindowTitle("写真コレクションの詳細")
-        self.resize(900, 620)
+        self.resize(900, 640)
+        self.collection = collection
+        self.on_remove = on_remove
         v = QVBoxLayout(self)
         tabs = QTabWidget()
+        self.tabs = tabs
 
-        model = ThumbModel(collection, show_names=True, parent=self)
-        tabs.addTab(_thumb_view(model, strip=False), f"読み込めた写真（{len(collection.records):,}枚）")
+        self.model = ThumbModel(collection, show_names=True, parent=self)
+        page = QWidget_()
+        pv = QVBoxLayout(page)
+        pv.setContentsMargins(0, 0, 0, 0)
+        self.grid = _thumb_view(self.model, strip=False)
+        bar = QHBoxLayout()
+        hint = QLabel("写真をクリックして選び（Ctrl＋クリックで複数・Ctrl＋Aで全部）、「選んだ写真を外す」で除外できます。")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        self.btn_remove = QPushButton("選んだ写真を外す")
+        self.btn_remove.setEnabled(False)
+        self.btn_remove.clicked.connect(self._remove_selected)
+        bar.addWidget(hint, 1)
+        bar.addWidget(self.btn_remove)
+        pv.addLayout(bar)
+        pv.addWidget(self.grid)
+        self.grid.selectionModel().selectionChanged.connect(self._sel_changed)
+        self.grid.customContextMenuRequested.connect(self._menu)
+        act = QAction("選んだ写真を外す", self.grid)
+        act.setShortcut(QKeySequence.StandardKey.Delete)
+        act.triggered.connect(self._remove_selected)
+        self.grid.addAction(act)
+        tabs.addTab(page, f"読み込めた写真（{len(collection.records):,}枚）")
 
         table = QTableWidget(len(collection.failed), 2)
         table.setHorizontalHeaderLabels(["ファイル", "理由"])
@@ -113,13 +139,34 @@ class CollectionDetailDialog(QDialog):
         tabs.addTab(dup, f"重複のため除外（{len(collection.duplicates):,}枚）")
 
         v.addWidget(tabs)
-        note = QLabel("※ 元の写真ファイルは変更・削除されません。読み込めなかった写真はモザイクに使われません。")
+        note = QLabel("※ 「外す」はコレクションから除くだけで、元の写真ファイルは削除されません。読み込めなかった写真はモザイクに使われません。")
         note.setObjectName("hint")
         v.addWidget(note)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         bb.button(QDialogButtonBox.StandardButton.Close).setText("閉じる")
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
+
+    def _sel_changed(self, *_):
+        n = len(self.grid.selectionModel().selectedIndexes())
+        self.btn_remove.setEnabled(n > 0)
+        self.btn_remove.setText(f"選んだ写真を外す（{n}枚）" if n else "選んだ写真を外す")
+
+    def _menu(self, pos):
+        n = len(self.grid.selectionModel().selectedIndexes())
+        if not n:
+            return
+        m = QMenu(self)
+        m.addAction(f"選んだ写真を外す（{n}枚）", self._remove_selected)
+        m.exec(self.grid.viewport().mapToGlobal(pos))
+
+    def _remove_selected(self):
+        rows = [i.row() for i in self.grid.selectionModel().selectedIndexes()]
+        if rows and self.on_remove:
+            self.on_remove(rows)
+            self.model.refresh()
+            self.tabs.setTabText(0, f"読み込めた写真（{len(self.collection.records):,}枚）")
+            self._sel_changed()
 
 
 class CollectionPanel(QGroupBox):
@@ -149,6 +196,10 @@ class CollectionPanel(QGroupBox):
         self.lbl_count.setObjectName("hint")
         self.lbl_count.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.btn_detail = QPushButton("詳細")
+        self.btn_remove = QPushButton("選んだ写真を外す")
+        self.btn_remove.setToolTip("サムネイルをクリックして選び（Ctrl＋クリックで複数）、コレクションから外します。\n元の写真ファイルは削除されません。")
+        self.btn_remove.setVisible(False)
+        self.btn_remove.clicked.connect(self.remove_selected)
         self.btn_clear = QPushButton("すべて外す")
         self.btn_folder.clicked.connect(self.choose_folder)
         self.btn_files.clicked.connect(self.choose_files)
@@ -157,6 +208,7 @@ class CollectionPanel(QGroupBox):
         for w in (self.btn_folder, self.btn_files, self.chk_recursive):
             row.addWidget(w)
         row.addWidget(self.lbl_count, 1)
+        row.addWidget(self.btn_remove)
         row.addWidget(self.btn_detail)
         row.addWidget(self.btn_clear)
         v.addLayout(row)
@@ -176,7 +228,16 @@ class CollectionPanel(QGroupBox):
 
         self.model = ThumbModel(self.collection, parent=self)
         self.view = _thumb_view(self.model, strip=True)
+        self.view.selectionModel().selectionChanged.connect(self._on_selection)
+        self.view.customContextMenuRequested.connect(self._context_menu)
+        act = QAction("選んだ写真を外す", self.view)
+        act.setShortcut(QKeySequence.StandardKey.Delete)
+        act.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        act.triggered.connect(self.remove_selected)
+        self.view.addAction(act)
         v.addWidget(self.view)
+        self.collection.excluded = set(self.settings.value("collection/excluded", [], type=list) or [])
+        self.collection.excluded_sha1 = set(self.settings.value("collection/excluded_sha1", [], type=list) or [])
         self._set_busy(False)
         self._update_label()
 
@@ -205,11 +266,15 @@ class CollectionPanel(QGroupBox):
             QMessageBox.information(self, "上限に達しています",
                                     f"写真は最大{config.MAX_TILE_PHOTOS:,}枚までです。\n「すべて外す」か、写真を減らしてから追加してください。")
             return
+        explicit_files = [x for x in sources if Path(x).is_file()]
+        if not restoring:  # 利用者が明示的に選び直したファイルは、外した写真でも戻す
+            self.collection.unexclude(explicit_files)
         self._set_busy(True)
         self.lbl_progress.setText("前回の写真を確認しています…" if restoring else "写真を探しています…")
         self.progress.setRange(0, 0)
         w = workers.Worker(col.analyze_sources, list(sources), recursive=self.chk_recursive.isChecked(),
-                           known_paths=self.collection.known_paths(), known_sha1=self.collection.known_sha1(),
+                           known_paths=self.collection.skip_paths(),
+                           known_sha1=self.collection.known_sha1(include_excluded=restoring or not explicit_files),
                            capacity=self.collection.capacity, with_progress=True)
         w.signals.progress.connect(self._on_progress)
         w.signals.finished.connect(lambda r: self._on_finished(r, sources, restoring))
@@ -281,7 +346,46 @@ class CollectionPanel(QGroupBox):
         self.changed.emit(0)
 
     def show_details(self) -> None:
-        CollectionDetailDialog(self.collection, self).exec()
+        CollectionDetailDialog(self.collection, self, on_remove=self._remove_rows).exec()
+
+    # ---- 写真を外す ----
+    def _selected_rows(self) -> list[int]:
+        return sorted({i.row() for i in self.view.selectionModel().selectedIndexes()})
+
+    def _on_selection(self, *_) -> None:
+        n = len(self._selected_rows())
+        self.btn_remove.setVisible(n > 0)
+        self.btn_remove.setText(f"選んだ写真を外す（{n}枚）")
+
+    def _context_menu(self, pos) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            idx = self.view.indexAt(pos)
+            if not idx.isValid():
+                return
+            self.view.selectionModel().select(idx, self.view.selectionModel().SelectionFlag.ClearAndSelect)
+            rows = [idx.row()]
+        m = QMenu(self)
+        m.addAction(f"選んだ写真を外す（{len(rows)}枚）", self.remove_selected)
+        m.addAction("すべて選択", self.view.selectAll)
+        m.exec(self.view.viewport().mapToGlobal(pos))
+
+    def remove_selected(self) -> None:
+        rows = self._selected_rows()
+        if rows:
+            self._remove_rows(rows)
+
+    def _remove_rows(self, rows: list[int]) -> None:
+        if self.is_busy():
+            self.message.emit("読み込み中は外せません。読み込みが終わってからお試しください。", 5000)
+            return
+        removed = self.collection.remove_indices(rows)
+        self.model.refresh()
+        self._update_label()
+        self._on_selection()
+        self._save_sources()
+        self.message.emit(f"{len(removed)}枚をコレクションから外しました（元の写真ファイルは残っています）。", 8000)
+        self.changed.emit(len(self.collection))
 
     # ---- 前回の写真の自動復元 ----
     def restore_previous(self) -> None:
@@ -292,6 +396,8 @@ class CollectionPanel(QGroupBox):
 
     def _save_sources(self) -> None:
         self.settings.setValue("collection/sources", self.collection.sources)
+        self.settings.setValue("collection/excluded", sorted(self.collection.excluded))
+        self.settings.setValue("collection/excluded_sha1", sorted(self.collection.excluded_sha1))
 
     # ---- 表示 ----
     def set_drop_highlight(self, on: bool, count: int = 0) -> None:

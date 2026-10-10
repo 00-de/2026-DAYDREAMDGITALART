@@ -9,9 +9,9 @@ a = Analysis(
     ["main.py"],
     pathex=[],
     datas=[("assets", "assets"), ("THIRD_PARTY_NOTICES.txt", ".")],
-    hiddenimports=[],
+    hiddenimports=["PySide6.QtMultimedia"],  # 動画の書き出し（関数の中で読み込むため明示）
     excludes=["tkinter", "unittest.mock", "pydoc", "PySide6.QtQml", "PySide6.QtQuick",
-              "PySide6.QtWebEngineCore", "PySide6.QtMultimedia", "PySide6.Qt3DCore"],
+              "PySide6.QtWebEngineCore", "PySide6.Qt3DCore"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

@@ -115,6 +115,26 @@ class CollectionTest(unittest.TestCase):
         c.clear()
         self.assertEqual(len(c), 0)
 
+    def test_remove_and_exclude(self):
+        c = col.PhotoCollection()
+        r = col.analyze_sources([str(self.dir)], cache=self.cache)
+        c.merge(r, [str(self.dir)])
+        n = len(c)
+        removed = c.remove_indices([0, 2])
+        self.assertEqual(len(removed), 2)
+        self.assertEqual(len(c), n - 2)
+        # フォルダーを読み直しても、外した写真は戻らない
+        r2 = col.analyze_sources([str(self.dir)], known_paths=c.skip_paths(), known_sha1=c.known_sha1(),
+                                 cache=self.cache)
+        self.assertEqual(len(r2.records), 0)
+        # 利用者が明示的に選び直せば戻る
+        c.unexclude([removed[0]])
+        r3 = col.analyze_sources([removed[0]], known_paths=c.skip_paths(), known_sha1=c.known_sha1(include_excluded=False),
+                                 cache=self.cache)
+        self.assertEqual(len(r3.records), 1)
+        # 元のファイルは消えていない
+        self.assertTrue(Path(removed[1]).exists())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

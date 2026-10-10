@@ -297,6 +297,8 @@ class PhotoCollection:
         self.sources: list[str] = []      # 追加に使ったフォルダー／ファイル（次回の自動復元用）
         self.failed: list[tuple[str, str]] = []
         self.duplicates: list[str] = []
+        self.excluded: set[str] = set()   # 利用者が「外した」写真（フォルダーを読み直しても戻さない）
+        self.excluded_sha1: set[str] = set()  # 外した写真の指紋（名前違いの同じ写真も戻さない）
 
     def __len__(self) -> int:
         return len(self.records)
@@ -308,8 +310,29 @@ class PhotoCollection:
     def known_paths(self) -> set[str]:
         return {_norm(r.path) for r in self.records}
 
-    def known_sha1(self) -> set[str]:
-        return {r.sha1 for r in self.records}
+    def skip_paths(self) -> set[str]:
+        """読み込みを省く写真：登録済み＋利用者が外した写真。"""
+        return self.known_paths() | self.excluded
+
+    def remove_indices(self, indices: Iterable[int]) -> list[str]:
+        """指定した番号の写真をコレクションから外す（元のファイルは削除しない）。"""
+        idx = sorted({i for i in indices if 0 <= i < len(self.records)}, reverse=True)
+        removed = []
+        for i in idx:
+            rec = self.records.pop(i)
+            self.excluded.add(_norm(rec.path))
+            self.excluded_sha1.add(rec.sha1)
+            removed.append(rec.path)
+        return removed[::-1]
+
+    def unexclude(self, paths: Iterable[str]) -> None:
+        """「外した」写真を、利用者がもう一度追加したときは戻せるようにする。"""
+        for p in paths:
+            self.excluded.discard(_norm(p))
+
+    def known_sha1(self, include_excluded: bool = True) -> set[str]:
+        shas = {r.sha1 for r in self.records}
+        return shas | self.excluded_sha1 if include_excluded else shas
 
     def merge(self, result: BatchResult, sources: Iterable[str]) -> None:
         self.records.extend(result.records)
@@ -325,6 +348,8 @@ class PhotoCollection:
         self.sources.clear()
         self.failed.clear()
         self.duplicates.clear()
+        self.excluded.clear()
+        self.excluded_sha1.clear()
 
     def lab_matrix(self) -> np.ndarray:
         """モザイク生成用：全写真の平均Lab（形 [枚数, 3]）。"""

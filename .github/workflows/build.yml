@@ -129,7 +129,11 @@ jobs:
 
           $out = "$pwd\selftest_installed.json"
           $p = Start-Process $exe -ArgumentList "--self-test", "`"$out`"" -Wait -PassThru
-          if (Test-Path $out) { Get-Content $out -Encoding utf8 }
+          if (Test-Path $out) {
+            Get-Content $out -Encoding utf8
+            # 自己診断の結果（MP4 の圧縮方式など）を毎回 Summary 欄に残す
+            "## インストール後の自己診断`n``````json`n$((Get-Content $out -Encoding utf8) -join "`n")`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
           if ($p.ExitCode -ne 0) {
             $detail = if (Test-Path $out) { (Get-Content $out -Encoding utf8) -join "`n" } else { "結果ファイルなし" }
             "## ❌ インストール後の自己診断に失敗しました`n``````json`n$detail`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

@@ -24,6 +24,7 @@ POPUPS: list[str] = []
 for _name in ("information", "warning", "critical"):
     setattr(QMessageBox, _name, staticmethod(lambda *a, **k: POPUPS.append(a[2] if len(a) > 2 else "") or QMessageBox.StandardButton.Ok))
 QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+QMessageBox.exec = lambda self, *a: POPUPS.append(self.text()) or 0  # 完了のお知らせ等も自動で閉じる
 
 
 def pump(cond, timeout=30.0):
@@ -132,6 +133,24 @@ class GuiTest(unittest.TestCase):
         self.assertTrue(pump(lambda: not panel.is_busy() and len(panel.collection) == before + 2))
         self.assertFalse(panel.property("dropping"), "ドロップ後も強調表示が残っている")
 
+    def test_3d_remove_selected_photos(self):
+        panel = self.w.collection_panel
+        self.assertTrue(pump(lambda: not panel.is_busy()))
+        n = len(panel.collection)
+        first_two = [panel.collection.records[i].path for i in (0, 1)]
+        sm = panel.view.selectionModel()
+        for row in (0, 1):
+            sm.select(panel.model.index(row), sm.SelectionFlag.Select)
+        self.assertTrue(panel.btn_remove.isVisible() or panel.btn_remove.text().endswith("（2枚）"))
+        panel.remove_selected()
+        self.assertEqual(len(panel.collection), n - 2)
+        for p in first_two:
+            self.assertTrue(Path(p).exists(), "元のファイルが削除されてはいけない")
+        # 同じフォルダーをもう一度追加しても、外した写真は戻らない
+        panel.add_sources([str(self.photos)])
+        self.assertTrue(pump(lambda: not panel.is_busy()))
+        self.assertEqual(len(panel.collection), n - 2)
+
     def test_4_text_input_limit(self):
         self.w.mode_tabs.setCurrentIndex(1)
         self.w.ed_text.setPlainText("あ" * 45)
@@ -166,6 +185,32 @@ class GuiTest(unittest.TestCase):
         self.w.generate()
         self.assertTrue(pump(lambda: self.w._gen_worker is None, 60))
         self.assertEqual(self.w._result.settings["mode"], "text")
+
+    def test_6b_animation_preview_and_export(self):
+        if not self.w._fonts:
+            self.assertTrue(pump(lambda: bool(self.w._fonts), 30))
+        self.w.mode_tabs.setCurrentIndex(1)
+        self.w.ed_text.setPlainText("DD+")
+        self.w.cb_anim_size.setCurrentIndex(1)       # 720×1280
+        self.w.sp_anim_sec.setValue(2)
+        self.w.sp_anim_hold.setValue(0)
+        self.w.cb_anim.setCurrentIndex(123)
+        self.w.toggle_animation_preview()
+        self.assertTrue(pump(lambda: self.w._anim_timer.isActive(), 60), "プレビューが始まらない")
+        self.assertTrue(pump(lambda: self.w._anim_frame > 3, 10))
+        self.assertTrue(self.w.preview.has_image())
+        self.w.toggle_animation_preview()
+        self.assertFalse(self.w._anim_timer.isActive())
+        # 動き方だけ変えたときは写真を読み直さない（同じ係から作る）
+        before = self.w._anim_renderer
+        self.w.cb_anim.setCurrentIndex(7)
+        got = []
+        self.w._with_renderer(lambda r: got.append(r))
+        self.assertTrue(got and got[0].layout is before.layout and got[0].preset.index == 7)
+        out = Path(self.tmp.name) / "アニメ"
+        out.mkdir(exist_ok=True)
+        self.w._run_export(got[0], "gif", str(out / "テスト"))
+        self.assertTrue(pump(lambda: (out / "テスト.gif").exists(), 60))
 
     def test_7_generate_disabled_without_photos(self):
         self.w.collection_panel.clear()

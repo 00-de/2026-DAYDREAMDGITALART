@@ -1,6 +1,8 @@
 # 動作確認したバージョンに固定しています（勝手に新しい版に変わって壊れるのを防ぐ）
 # PySide6-Essentials：画面づくりに必要な部品だけの軽量版（インストーラーが小さくなる）
 PySide6-Essentials==6.12.0
+# PySide6-Addons：動画の書き出し（QtMultimedia・LGPL）に使う
+PySide6-Addons==6.12.0
 Pillow==12.3.0
 numpy==2.5.3
 regex==2026.9.29

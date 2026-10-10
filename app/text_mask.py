@@ -472,6 +472,19 @@ def recommend_tile_px(result: TextMaskResult, min_tiles_per_char: int = MIN_TILE
     return max(2, result.font_size // min_tiles_per_char)
 
 
+MIN_GRID_SHORT_SIDE = 60  # 文字が少なくても「写真のモザイク」に見えるよう、短い辺に最低このタイル数
+
+
+def auto_grid(result: TextMaskResult, min_short: int = MIN_GRID_SHORT_SIDE) -> tuple[int, int]:
+    """文字が読めて、写真のモザイクらしく見えるタイル数（横, 縦）を自動で決める。"""
+    cols, rows = grid_size_for(result.mask.size, recommend_tile_px(result))
+    short = min(cols, rows)
+    if short < min_short:
+        k = min_short / short
+        cols, rows = round(cols * k), round(rows * k)
+    return cols, rows
+
+
 def mask_coverage(mask: Image.Image, cols: int, rows: int) -> np.ndarray:
     """各升目のうち文字が占める割合（0.0〜1.0）を返す。形は (rows, cols)。"""
     small = mask.resize((cols, rows), Image.Resampling.BOX)
