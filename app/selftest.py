@@ -29,7 +29,7 @@ def run(result_path: str) -> int:
         report["version"] = VERSION
 
         # 1) JPG / JFIF / PNG（透過）の読み込み
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             d = Path(d) / "自己診断"
             d.mkdir()
             Image.new("RGB", (64, 48), (200, 40, 60)).save(d / "テスト.jfif", "JPEG")
@@ -45,7 +45,9 @@ def run(result_path: str) -> int:
             tiles.mkdir()
             for i in range(12):
                 Image.new("RGB", (40, 30), (i * 20, 255 - i * 20, 128)).save(tiles / f"t{i}.jpg", "JPEG")
-            recs = collection.analyze_sources([str(tiles)], cache=collection.AnalysisCache(d / "c.sqlite")).records
+            cache = collection.AnalysisCache(d / "c.sqlite")
+            recs = collection.analyze_sources([str(tiles)], cache=cache).records
+            cache.close()  # Windows では開いたままのファイルを削除できないため閉じる
             res = mosaic_engine.generate_photo_mosaic(
                 str(d / "テスト.jfif"), recs, mosaic_engine.PhotoMosaicSettings(cols=12, rows=9, tile_px=8))
             saved = exporter.save_image(res.image, exporter.SaveOptions(str(d / "完成"), "JPEG", 90))

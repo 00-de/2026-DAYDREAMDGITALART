@@ -65,7 +65,16 @@ jobs:
         timeout-minutes: 10
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m unittest discover -s tests -v
+        run: |
+          cmd /c "python -m unittest discover -s tests -v > test_output.txt 2>&1"
+          $code = $LASTEXITCODE
+          Get-Content test_output.txt -Encoding utf8
+          if ($code -ne 0) {
+            # 失敗の理由を、ログインしなくても見られる「Summary」欄に書き出す
+            $tail = (Get-Content test_output.txt -Encoding utf8 -Tail 120) -join "`n"
+            "## ❌ 自動テストで失敗しました`n``````text`n$tail`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            throw "自動テストに失敗しました"
+          }
 
       - name: ② バージョン番号を決める
         run: |
@@ -84,7 +93,11 @@ jobs:
           $out = "$pwd\selftest_exe.json"
           $p = Start-Process -FilePath $exe -ArgumentList "--self-test", "`"$out`"" -Wait -PassThru
           if (Test-Path $out) { Get-Content $out -Encoding utf8 }
-          if ($p.ExitCode -ne 0) { throw "EXE の自己診断に失敗しました（終了コード $($p.ExitCode)）" }
+          if ($p.ExitCode -ne 0) {
+            $detail = if (Test-Path $out) { (Get-Content $out -Encoding utf8) -join "`n" } else { "結果ファイルなし" }
+            "## ❌ EXE の自己診断に失敗しました`n``````json`n$detail`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            throw "EXE の自己診断に失敗しました（終了コード $($p.ExitCode)）"
+          }
 
       - name: ④ セットアップEXE を作成
         run: |
@@ -117,7 +130,11 @@ jobs:
           $out = "$pwd\selftest_installed.json"
           $p = Start-Process $exe -ArgumentList "--self-test", "`"$out`"" -Wait -PassThru
           if (Test-Path $out) { Get-Content $out -Encoding utf8 }
-          if ($p.ExitCode -ne 0) { throw "インストール後の自己診断に失敗しました" }
+          if ($p.ExitCode -ne 0) {
+            $detail = if (Test-Path $out) { (Get-Content $out -Encoding utf8) -join "`n" } else { "結果ファイルなし" }
+            "## ❌ インストール後の自己診断に失敗しました`n``````json`n$detail`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            throw "インストール後の自己診断に失敗しました"
+          }
 
           Start-Process "$dir\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
           for ($i = 0; $i -lt 30 -and (Test-Path $exe); $i++) { Start-Sleep -Seconds 1 }
@@ -133,6 +150,7 @@ jobs:
             dist_installer/*
             selftest_*.json
             install.log
+            test_output.txt
           if-no-files-found: ignore
 
       - name: ⑥ Releases に公開（自動更新の配信）

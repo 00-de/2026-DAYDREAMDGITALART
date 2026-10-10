@@ -26,7 +26,7 @@ def _jpeg_has_jfif_marker(path: Path) -> bool:
 class ImageIOTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tmp = tempfile.TemporaryDirectory()
+        cls.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         d = cls.dir = Path(cls.tmp.name) / "テスト写真フォルダー"
         d.mkdir()
         red = Image.new("RGB", (400, 300), (220, 30, 40))

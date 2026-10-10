@@ -19,7 +19,7 @@ from app.errors import MosaicError  # noqa: E402
 class MosaicTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tmp = tempfile.TemporaryDirectory()
+        cls.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         root = Path(cls.tmp.name)
         tiles = root / "タイル"
         tiles.mkdir()
@@ -29,7 +29,9 @@ class MosaicTest(unittest.TestCase):
             Image.new("RGB", (80, 60), c).save(tiles / f"t{i:02d}.jpg", "JPEG", quality=95)
         for name, c in (("white", (250, 250, 250)), ("black", (5, 5, 5)), ("red", (230, 20, 20)), ("blue", (20, 20, 230))):
             Image.new("RGB", (80, 60), c).save(tiles / f"{name}.png")
-        cls.records = col.analyze_sources([str(tiles)], cache=col.AnalysisCache(root / "c.sqlite")).records
+        cache = col.AnalysisCache(root / "c.sqlite")
+        cls.records = col.analyze_sources([str(tiles)], cache=cache).records
+        cache.close()  # Windows では開いたままのファイルを後片付けで削除できないため必ず閉じる
         # メイン写真：左半分が赤、右半分が青
         main = Image.new("RGB", (200, 100), (230, 20, 20))
         main.paste((20, 20, 230), (100, 0, 200, 100))
@@ -120,10 +122,12 @@ class MosaicTest(unittest.TestCase):
         img = Image.new("RGB", (400, 300), (100, 150, 200))
         p = exporter.save_image(img, exporter.SaveOptions(str(self.out_dir / "完成"), "PNG"))
         self.assertTrue(p.path.endswith(".png"))
-        self.assertEqual(Image.open(p.path).size, (400, 300))
+        with Image.open(p.path) as im:
+            self.assertEqual(im.size, (400, 300))
         j = exporter.save_image(img, exporter.SaveOptions(str(self.out_dir / "完成.jpg"), "JPEG", quality=80,
                                                           scale=0.5, save_settings=True), settings={"seed": 1})
-        self.assertEqual(Image.open(j.path).format, "JPEG")
+        with Image.open(j.path) as im:
+            self.assertEqual(im.format, "JPEG")
         self.assertEqual((j.width, j.height), (200, 150))
         self.assertEqual(json.loads(Path(j.settings_path).read_text(encoding="utf-8"))["seed"], 1)
         self.assertFalse(list(self.out_dir.glob(".ddp_saving_*")), "一時ファイルが残っている")

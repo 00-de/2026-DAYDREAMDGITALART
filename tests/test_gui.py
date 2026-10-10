@@ -39,7 +39,7 @@ def pump(cond, timeout=30.0):
 class GuiTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tmp = tempfile.TemporaryDirectory()
+        cls.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         os.environ["LOCALAPPDATA"] = cls.tmp.name      # 保存庫をテスト用の場所に
         os.environ["XDG_DATA_HOME"] = cls.tmp.name
         QSettings.setDefaultFormat(QSettings.Format.IniFormat)

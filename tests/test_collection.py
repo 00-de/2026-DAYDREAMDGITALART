@@ -25,7 +25,7 @@ class ColorTest(unittest.TestCase):
 
 class CollectionTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         root = Path(self.tmp.name)
         self.dir = root / "ライブ写真"
         sub = self.dir / "サブフォルダー"
