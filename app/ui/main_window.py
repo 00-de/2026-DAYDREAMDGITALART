@@ -18,12 +18,13 @@ from PySide6.QtWidgets import (
     QSpinBox, QSplitter, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from .. import config, image_io, paths, text_mask, updater
+from .. import config, exporter, image_io, mosaic_engine, paths, text_mask, updater
 from ..errors import MosaicError
 from ..version import VERSION
 from . import workers
 from .collection_view import CollectionPanel
 from .preview import PreviewView
+from .save_dialog import SaveDialog
 from .style import STYLESHEET
 
 # 文字モザイクのキャンバス形（縦横比）
@@ -98,13 +99,16 @@ class MainWindow(QMainWindow):
         self._last_text_result = None
         self._fonts: tuple[text_mask.FontInfo, ...] = ()
         self._active_workers: set[workers.Worker] = set()
+        self._result: mosaic_engine.MosaicResult | None = None   # 最後に生成したモザイク
+        self._result_mode = -1
+        self._gen_worker: workers.Worker | None = None
+
+        self._text_timer = QTimer(self, singleShot=True, interval=350)
+        self._text_timer.timeout.connect(self._render_text_preview)
 
         self._build_menu()
         self._build_ui()
         self._restore_settings()
-
-        self._text_timer = QTimer(self, singleShot=True, interval=350)
-        self._text_timer.timeout.connect(self._render_text_preview)
 
         self._load_fonts()
         self.setAcceptDrops(True)
@@ -166,6 +170,7 @@ class MainWindow(QMainWindow):
         # ---- ① 写真コレクション ----
         self.collection_panel = CollectionPanel(self.settings)
         self.collection_panel.message.connect(lambda t, ms: self.statusBar().showMessage(t, ms))
+        self.collection_panel.changed.connect(lambda n: self._update_generate_enabled())
         root.addWidget(self.collection_panel)
 
         # ---- ② 設定 ＋ ③ プレビュー ----
@@ -364,6 +369,8 @@ class MainWindow(QMainWindow):
         grp.addButton(self.tb_after)
         bar.addWidget(self.tb_before)
         bar.addWidget(self.tb_after)
+        self.tb_before.clicked.connect(self._show_before)
+        self.tb_after.clicked.connect(self._show_after)
         bar.addStretch(1)
         self.lbl_zoom = QLabel("", objectName="hint")
         b_out = QToolButton(text="－")
@@ -396,13 +403,18 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         self.btn_generate = QPushButton("✨ モザイク生成開始", objectName="primary")
         self.btn_generate.setEnabled(False)
-        self.btn_generate.setToolTip("モザイク生成機能は次の更新（フェーズ6）で追加されます")
+        self.btn_generate.clicked.connect(self.generate)
+        self.btn_cancel_gen = QPushButton("中止")
+        self.btn_cancel_gen.setVisible(False)
+        self.btn_cancel_gen.clicked.connect(self.cancel_generation)
         self.btn_save = QPushButton("💾 保存（PNG／JPEG）")
         self.btn_save.setEnabled(False)
         self.btn_save.setToolTip("モザイクを生成すると保存できます")
+        self.btn_save.clicked.connect(self.save_result)
         h.addWidget(self.lbl_summary, 1)
         h.addWidget(self.btn_reset)
         h.addWidget(self.progress)
+        h.addWidget(self.btn_cancel_gen)
         h.addWidget(self.btn_generate)
         h.addWidget(self.btn_save)
         return w
@@ -432,7 +444,9 @@ class MainWindow(QMainWindow):
         if li.warning:
             self.statusBar().showMessage(li.warning, 10000)
         self._update_photo_summary()
+        self._update_generate_enabled()
         if self.mode_tabs.currentIndex() == 0:
+            self.tb_before.setChecked(True)
             self.preview.set_image(li.image)
             self.lbl_preview_info.setText("生成前：メイン写真")
 
@@ -479,6 +493,8 @@ class MainWindow(QMainWindow):
         self.lbl_counter.style().unpolish(self.lbl_counter)
         self.lbl_counter.style().polish(self.lbl_counter)
         self._schedule_text_preview()
+        if hasattr(self, "btn_generate"):
+            self._update_generate_enabled()
 
     def _load_fonts(self) -> None:
         self._run(text_mask.find_japanese_fonts, self._on_fonts_loaded, on_error=self._on_fonts_failed)
@@ -592,7 +608,8 @@ class MainWindow(QMainWindow):
             return  # もっと新しい依頼があるので、この結果は使わない
         res, cols, rows, img = result
         self._last_text_result = result
-        self.preview.set_image(img, keep_zoom=True)
+        if self.tb_before.isChecked():
+            self.preview.set_image(img, keep_zoom=True)
         lines = " ／ ".join(res.lines)
         self.lbl_preview_info.setText(f"文字の配置：{lines}　（{res.font.display_name}・{res.font_size}px相当）")
         self.lbl_text_warn.setText("\n".join("⚠ " + w for w in res.warnings))
@@ -605,6 +622,7 @@ class MainWindow(QMainWindow):
                                        ("\n" if self.lbl_text_warn.text() else "") +
                                        "⚠ タイルが粗いため、画数の多い漢字が読みにくい可能性があります。横のタイル数を増やしてください。")
         self._show_summary(cols, rows, self.sp_text_tile.value())
+        self._update_generate_enabled()
 
     def _on_text_preview_error(self, job: int, e) -> None:
         if job != self._text_job:
@@ -617,6 +635,10 @@ class MainWindow(QMainWindow):
     # モード切り替え・設定の保存
     # ==================================================================
     def _on_mode_changed(self, idx: int) -> None:
+        self.tb_before.setChecked(True)
+        self.tb_after.setEnabled(self._result is not None and self._result_mode == idx)
+        self.btn_save.setEnabled(self._result is not None and self._result_mode == idx)
+        self._update_generate_enabled()
         if idx == 0:
             if self._main_photo:
                 self.preview.set_image(self._main_photo.image)
@@ -699,10 +721,169 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e) -> None:
         if self.collection_panel.is_busy():
             self.collection_panel.cancel()  # 読み込み中に閉じても安全に止める
+        if self._gen_worker:
+            self._gen_worker.cancel()
         self._save_settings()
         for w in list(self._active_workers):
             w.cancel()
         super().closeEvent(e)
+
+    # ==================================================================
+    # モザイク生成・プレビュー切り替え・保存
+    # ==================================================================
+    def _generate_blocker(self) -> str:
+        """生成できない理由（できるときは空文字）。"""
+        if self._gen_worker:
+            return "生成中です"
+        if len(self.collection_panel.collection) == 0:
+            return "① 写真コレクションに、タイル用の写真を追加してください"
+        if self.mode_tabs.currentIndex() == 0:
+            if self._main_photo is None:
+                return "メイン写真を選んでください"
+        else:
+            n = text_mask.count_chars(text_mask.normalize_text(self.ed_text.toPlainText()))
+            if n < config.TEXT_MIN_CHARS:
+                return "文章を入力してください"
+            if not self._fonts:
+                return "フォントを準備しています"
+        return ""
+
+    def _update_generate_enabled(self) -> None:
+        reason = self._generate_blocker()
+        self.btn_generate.setEnabled(not reason)
+        self.btn_generate.setToolTip(reason or "モザイクを作ります（途中で中止できます）")
+
+    def generate(self) -> None:
+        if self._generate_blocker():
+            return
+        records = list(self.collection_panel.collection.records)
+        mode = self.mode_tabs.currentIndex()
+        seed = int.from_bytes(__import__("os").urandom(4), "little")
+        if mode == 0:
+            s = mosaic_engine.PhotoMosaicSettings(
+                cols=self.sp_cols.value(), rows=self.sp_rows.value(), tile_px=self.sp_tile.value(),
+                max_uses=self.sp_uses.value(), color_match=self.sl_match.value(), edge=self.sl_edge.value(),
+                border=self.chk_border.isChecked(), seed=seed)
+            fn, args = mosaic_engine.generate_photo_mosaic, (str(self._main_photo.path), records, s)
+        else:
+            text = self.ed_text.toPlainText()
+            ms = self._text_settings()
+            auto, manual = self.chk_auto_tiles.isChecked(), self.sp_text_cols.value()
+            tile_px = self.sp_text_tile.value()
+            text_rgb, bg_rgb = self._text_color.getRgb()[:3], self._bg_color.getRgb()[:3]
+            bg_photos = self.rb_bg_photo.isChecked()
+
+            def fn(progress=None, is_cancelled=None):
+                _, cols, rows, _ = MainWindow.build_text_preview(text, ms, auto, manual, text_rgb, bg_rgb)
+                st = mosaic_engine.TextMosaicSettings(cols=cols, rows=rows, tile_px=tile_px, text_color=text_rgb,
+                                                      bg_color=bg_rgb, bg_photos=bg_photos, seed=seed)
+                return mosaic_engine.generate_text_mosaic(text, ms, records, st, progress, is_cancelled)
+            args = ()
+
+        w = workers.Worker(fn, *args, with_progress=True)
+        w.signals.progress.connect(self._on_gen_progress)
+        self._gen_worker = w
+        self._set_generating(True)
+        self._track(w, lambda r: self._on_generated(r, mode), self._on_generate_failed)
+        workers.start(w)
+
+    def _set_generating(self, on: bool) -> None:
+        self.progress.setVisible(on)
+        self.progress.setRange(0, 1000)
+        self.progress.setValue(0)
+        self.btn_cancel_gen.setVisible(on)
+        self.btn_cancel_gen.setEnabled(True)
+        self.btn_generate.setText("生成中…" if on else "✨ モザイク生成開始")
+        self.mode_tabs.setEnabled(not on)
+        self.btn_reset.setEnabled(not on)
+        self._update_generate_enabled()
+        if on:
+            self.statusBar().showMessage("モザイクを作っています…（写真の枚数やタイル数によって数十秒〜数分かかります）")
+
+    def _on_gen_progress(self, done: int, total: int) -> None:
+        self.progress.setValue(int(done * 1000 / max(1, total)))
+
+    def cancel_generation(self) -> None:
+        if self._gen_worker:
+            self._gen_worker.cancel()
+            self.btn_cancel_gen.setEnabled(False)
+            self.statusBar().showMessage("中止しています…")
+
+    def _on_generated(self, result: mosaic_engine.MosaicResult, mode: int) -> None:
+        self._gen_worker = None
+        self._set_generating(False)
+        self._result, self._result_mode = result, mode
+        self.mode_tabs.setCurrentIndex(mode)
+        self.tb_after.setEnabled(True)
+        self.btn_save.setEnabled(True)
+        self._show_after()
+        self.tb_after.setChecked(True)
+        self.statusBar().showMessage(f"完成しました（{result.stats.get('生成時間', '')}）。「保存」で画像を保存できます。", 15000)
+        if result.warnings:
+            QMessageBox.information(self, "お知らせ", "\n\n".join(result.warnings))
+
+    def _on_generate_failed(self, e) -> None:
+        self._gen_worker = None
+        self._set_generating(False)
+        if isinstance(e, mosaic_engine.GenerationCancelled):
+            self.statusBar().showMessage("生成を中止しました。", 6000)
+            return
+        self._show_error(e)
+
+    def _show_before(self) -> None:
+        self.tb_before.setChecked(True)
+        if self.mode_tabs.currentIndex() == 0:
+            if self._main_photo:
+                self.preview.set_image(self._main_photo.image)
+                self.lbl_preview_info.setText("生成前：メイン写真")
+        elif self._last_text_result:
+            self.preview.set_image(self._last_text_result[3])
+            self.lbl_preview_info.setText("生成前：文字の配置（タイルの升目）")
+
+    def _show_after(self) -> None:
+        if not self._result or self._result_mode != self.mode_tabs.currentIndex():
+            return
+        self.tb_after.setChecked(True)
+        self.preview.set_image(self._result.preview)
+        self.lbl_preview_info.setText("生成後：" + "　".join(f"{k} {v}" for k, v in self._result.stats.items()))
+
+    def save_result(self) -> None:
+        if not self._result:
+            return
+        mode = "text" if self._result_mode == 1 else "photo"
+        dlg = SaveDialog(self.settings, self._result.image.size, mode, self)
+        if dlg.exec() != SaveDialog.DialogCode.Accepted:
+            return
+        protected = {r.path for r in self.collection_panel.collection.records}
+        if self._main_photo:
+            protected.add(str(self._main_photo.path))
+        img, settings, opts = self._result.image, self._result.settings, dlg.options
+        self.statusBar().showMessage("保存しています…")
+        self.btn_save.setEnabled(False)
+
+        def done(res: exporter.SaveResult):
+            self.btn_save.setEnabled(True)
+            self.statusBar().showMessage(f"保存しました：{res.path}", 15000)
+            box = QMessageBox(self)
+            box.setWindowTitle("保存しました")
+            box.setIcon(QMessageBox.Icon.Information)
+            msg = (f"保存先：{res.path}\n大きさ：{res.width:,}×{res.height:,}px（{res.bytes / 1e6:,.1f}MB）")
+            if res.settings_path:
+                msg += f"\n設定情報：{Path(res.settings_path).name}"
+            box.setText(msg)
+            b_open = box.addButton("フォルダーを開く", QMessageBox.ButtonRole.ActionRole)
+            box.addButton("閉じる", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is b_open:
+                from PySide6.QtCore import QUrl
+                from PySide6.QtGui import QDesktopServices
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(res.path).parent)))
+
+        def failed(e):
+            self.btn_save.setEnabled(True)
+            self._show_error(e)
+
+        self._run(lambda: exporter.save_image(img, opts, protected, settings), done, on_error=failed)
 
     # ==================================================================
     # ドラッグ＆ドロップ

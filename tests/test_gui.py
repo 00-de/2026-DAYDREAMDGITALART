@@ -94,6 +94,40 @@ class GuiTest(unittest.TestCase):
         self.assertEqual(text_mask.count_chars(self.w.ed_text.toPlainText()), config.TEXT_MAX_CHARS)
         self.assertIn("40 / 40", self.w.lbl_counter.text())
 
+    def test_5_generate_photo_mosaic_and_save(self):
+        from app import exporter
+        self.w.mode_tabs.setCurrentIndex(0)
+        self.assertTrue(pump(lambda: self.w._main_photo is not None))
+        self.w.sp_tile.setValue(10)
+        self.w.sp_cols.setValue(20)
+        self.assertTrue(self.w.btn_generate.isEnabled(), self.w.btn_generate.toolTip())
+        self.w.generate()
+        self.assertTrue(pump(lambda: self.w._gen_worker is None, 60))
+        self.assertIsNotNone(self.w._result)
+        self.assertTrue(self.w.tb_after.isChecked())
+        self.assertTrue(self.w.btn_save.isEnabled())
+        out = Path(self.tmp.name) / "保存先"
+        out.mkdir()
+        r = exporter.save_image(self.w._result.image, exporter.SaveOptions(str(out / "作品"), "JPEG", 90))
+        self.assertTrue(Path(r.path).exists())
+
+    def test_6_generate_text_mosaic(self):
+        if not self.w._fonts:
+            self.assertTrue(pump(lambda: bool(self.w._fonts), 30))
+        self.w.mode_tabs.setCurrentIndex(1)
+        self.w.ed_text.setPlainText("ドリプラ")
+        self.w.sp_text_tile.setValue(10)
+        self.assertTrue(pump(lambda: self.w.btn_generate.isEnabled()), self.w.btn_generate.toolTip())
+        self.w.generate()
+        self.assertTrue(pump(lambda: self.w._gen_worker is None, 60))
+        self.assertEqual(self.w._result.settings["mode"], "text")
+
+    def test_7_generate_disabled_without_photos(self):
+        self.w.collection_panel.clear()
+        self.w.mode_tabs.setCurrentIndex(0)
+        self.assertFalse(self.w.btn_generate.isEnabled())
+        self.assertIn("写真コレクション", self.w.btn_generate.toolTip())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

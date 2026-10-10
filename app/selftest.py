@@ -39,6 +39,18 @@ def run(result_path: str) -> int:
             ok = sum(1 for f in image_io.iter_candidate_files(d) if _try_load(image_io, f))
             checks["image_io"] = ok == 3
 
+            # 1b) 写真コレクション → モザイク生成 → 保存
+            from . import collection, exporter, mosaic_engine
+            tiles = d / "タイル"
+            tiles.mkdir()
+            for i in range(12):
+                Image.new("RGB", (40, 30), (i * 20, 255 - i * 20, 128)).save(tiles / f"t{i}.jpg", "JPEG")
+            recs = collection.analyze_sources([str(tiles)], cache=collection.AnalysisCache(d / "c.sqlite")).records
+            res = mosaic_engine.generate_photo_mosaic(
+                str(d / "テスト.jfif"), recs, mosaic_engine.PhotoMosaicSettings(cols=12, rows=9, tile_px=8))
+            saved = exporter.save_image(res.image, exporter.SaveOptions(str(d / "完成"), "JPEG", 90))
+            checks["mosaic"] = len(recs) == 12 and Path(saved.path).stat().st_size > 0
+
         # 2) 日本語フォントと文字マスク
         fonts = text_mask.find_japanese_fonts()
         checks["japanese_fonts"] = len(fonts)
@@ -60,7 +72,8 @@ def run(result_path: str) -> int:
         win.close()
         app.processEvents()
 
-        report["ok"] = checks["image_io"] is True and checks["gui"] is True and checks["text_mask"] is not False
+        report["ok"] = (checks["image_io"] is True and checks["mosaic"] is True and checks["gui"] is True
+                        and checks["text_mask"] is not False)
     except Exception:
         report["error"] = traceback.format_exc()
     report["seconds"] = round(time.time() - t0, 2)
