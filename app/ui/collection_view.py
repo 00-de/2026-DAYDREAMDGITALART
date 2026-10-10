@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import QAbstractListModel, QModelIndex, QSettings, QSize, Qt, Signal
-from PySide6.QtGui import QAction, QKeySequence, QPixmap
+from PySide6.QtCore import QAbstractListModel, QEvent, QModelIndex, QRect, QSettings, QSize, Qt, Signal
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QDialog, QMenu, QDialogButtonBox, QFileDialog, QGroupBox, QHBoxLayout,
+    QAbstractItemView, QCheckBox, QDialog, QMenu, QStyle, QStyledItemDelegate, QDialogButtonBox, QFileDialog, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QListView, QListWidget, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
 )
@@ -62,6 +62,49 @@ class ThumbModel(QAbstractListModel):
         self.endResetModel()
 
 
+class ThumbDelegate(QStyledItemDelegate):
+    """サムネイルの描画：選んだ写真は紫の枠、マウスを乗せると右上に ✕（押すとその写真を外す）。"""
+
+    def __init__(self, on_remove, parent=None):
+        super().__init__(parent)
+        self.on_remove = on_remove
+
+    @staticmethod
+    def badge_rect(item_rect: QRect) -> QRect:
+        size = max(16, min(22, item_rect.width() // 3))
+        return QRect(item_rect.right() - size - 2, item_rect.top() + 2, size, size)
+
+    def paint(self, painter: QPainter, option, index) -> None:
+        super().paint(painter, option, index)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.setPen(QPen(QColor("#7C4DFF"), 3))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(option.rect.adjusted(2, 2, -2, -2), 6, 6)
+        if self.on_remove and option.state & QStyle.StateFlag.State_MouseOver:
+            b = self.badge_rect(option.rect)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(210, 40, 80, 230))
+            painter.drawEllipse(b)
+            painter.setPen(QPen(QColor("white"), 2))
+            m = b.width() // 4
+            painter.drawLine(b.left() + m, b.top() + m, b.right() - m, b.bottom() - m)
+            painter.drawLine(b.right() - m, b.top() + m, b.left() + m, b.bottom() - m)
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index) -> bool:
+        if (self.on_remove and event.type() == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
+                and self.badge_rect(option.rect).contains(event.position().toPoint())):
+            self.on_remove([index.row()])
+            return True
+        if (self.on_remove and event.type() == QEvent.Type.MouseButtonPress
+                and self.badge_rect(option.rect).contains(event.position().toPoint())):
+            return True  # ✕ を押したときは選択を変えない
+        return super().editorEvent(event, model, option, index)
+
+
 def _thumb_view(model: ThumbModel, strip: bool) -> QListView:
     v = QListView()
     v.setModel(model)
@@ -69,7 +112,10 @@ def _thumb_view(model: ThumbModel, strip: bool) -> QListView:
     v.setUniformItemSizes(True)
     v.setMovement(QListView.Movement.Static)
     v.setResizeMode(QListView.ResizeMode.Adjust)
-    v.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+    # クリックで選択（Ctrl＋クリックで複数、Shift＋クリックで範囲、Ctrl＋Aで全部）→「外す」
+    v.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+    v.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    v.setMouseTracking(True)  # マウスを乗せたときに ✕ を出すため
     if strip:
         v.setIconSize(QSize(64, 64))
         v.setGridSize(QSize(72, 72))
@@ -101,6 +147,7 @@ class CollectionDetailDialog(QDialog):
         pv = QVBoxLayout(page)
         pv.setContentsMargins(0, 0, 0, 0)
         self.grid = _thumb_view(self.model, strip=False)
+        self.grid.setItemDelegate(ThumbDelegate(self._remove_rows_direct, self.grid))
         bar = QHBoxLayout()
         hint = QLabel("写真をクリックして選び（Ctrl＋クリックで複数・Ctrl＋Aで全部）、「選んだ写真を外す」で除外できます。")
         hint.setObjectName("hint")
@@ -160,6 +207,13 @@ class CollectionDetailDialog(QDialog):
         m.addAction(f"選んだ写真を外す（{n}枚）", self._remove_selected)
         m.exec(self.grid.viewport().mapToGlobal(pos))
 
+    def _remove_rows_direct(self, rows):
+        if rows and self.on_remove:
+            self.on_remove(rows)
+            self.model.refresh()
+            self.tabs.setTabText(0, f"読み込めた写真（{len(self.collection.records):,}枚）")
+            self._sel_changed()
+
     def _remove_selected(self):
         rows = [i.row() for i in self.grid.selectionModel().selectedIndexes()]
         if rows and self.on_remove:
@@ -198,7 +252,7 @@ class CollectionPanel(QGroupBox):
         self.btn_detail = QPushButton("詳細")
         self.btn_remove = QPushButton("選んだ写真を外す")
         self.btn_remove.setToolTip("サムネイルをクリックして選び（Ctrl＋クリックで複数）、コレクションから外します。\n元の写真ファイルは削除されません。")
-        self.btn_remove.setVisible(False)
+        self.btn_remove.setEnabled(False)
         self.btn_remove.clicked.connect(self.remove_selected)
         self.btn_clear = QPushButton("すべて外す")
         self.btn_folder.clicked.connect(self.choose_folder)
@@ -228,6 +282,7 @@ class CollectionPanel(QGroupBox):
 
         self.model = ThumbModel(self.collection, parent=self)
         self.view = _thumb_view(self.model, strip=True)
+        self.view.setItemDelegate(ThumbDelegate(self._remove_rows, self.view))
         self.view.selectionModel().selectionChanged.connect(self._on_selection)
         self.view.customContextMenuRequested.connect(self._context_menu)
         act = QAction("選んだ写真を外す", self.view)
@@ -354,8 +409,8 @@ class CollectionPanel(QGroupBox):
 
     def _on_selection(self, *_) -> None:
         n = len(self._selected_rows())
-        self.btn_remove.setVisible(n > 0)
-        self.btn_remove.setText(f"選んだ写真を外す（{n}枚）")
+        self.btn_remove.setEnabled(n > 0)
+        self.btn_remove.setText(f"選んだ写真を外す（{n}枚）" if n else "選んだ写真を外す")
 
     def _context_menu(self, pos) -> None:
         rows = self._selected_rows()

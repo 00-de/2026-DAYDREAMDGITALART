@@ -224,18 +224,32 @@ _NEWLINES = ("\n", "\r\n", "\r")
 _WORD_CHAR = regex.compile(r"^[\p{Latin}\p{N}'’\-_&@#%+.]+$")
 
 
+_KANA_CHAR = regex.compile(r"^[\p{Hiragana}\p{Katakana}ー゛゜]+$")
+
+
+def _char_class(g: str) -> str:
+    if _WORD_CHAR.match(g):
+        return "latin"
+    if _KANA_CHAR.match(g):
+        return "kana"
+    return ""
+
+
 def _units(graphemes: list[str]) -> list[list[str]]:
     """折り返しの最小単位に分ける。
-    英単語・数字のかたまり（例：DayDream, 2027）は途中で切らない。
-    日本語は1文字ずつ。スペースと改行はそれぞれ単独の単位。
+    英単語・数字のかたまり（例：DayDream, 2027）と、ひらがな・カタカナのつながり（例：ありがとう）は
+    途中で切らない（1行に入りきらないほど長いときだけ分ける）。漢字は1文字ずつ。
+    スペースと改行はそれぞれ単独の単位。
     """
     units: list[list[str]] = []
+    prev = ""
     for g in graphemes:
-        is_word = bool(_WORD_CHAR.match(g))
-        if is_word and units and units[-1] and bool(_WORD_CHAR.match(units[-1][-1])):
+        cls = _char_class(g)
+        if cls and units and units[-1] and cls == prev:
             units[-1].append(g)
         else:
             units.append([g])
+        prev = cls
     return units
 
 

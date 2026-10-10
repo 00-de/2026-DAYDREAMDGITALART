@@ -133,23 +133,43 @@ class GuiTest(unittest.TestCase):
         self.assertTrue(pump(lambda: not panel.is_busy() and len(panel.collection) == before + 2))
         self.assertFalse(panel.property("dropping"), "ドロップ後も強調表示が残っている")
 
-    def test_3d_remove_selected_photos(self):
+    def test_3d_remove_photos_with_real_mouse_and_keys(self):
+        """本物のマウス操作・キー操作で外せること（プログラムから直接選ぶのではなく）。"""
+        from PySide6.QtTest import QTest
+        from app.ui.collection_view import ThumbDelegate
         panel = self.w.collection_panel
         self.assertTrue(pump(lambda: not panel.is_busy()))
+        v, vp = panel.view, panel.view.viewport()
+        rect = lambda row: v.visualRect(panel.model.index(row))  # noqa: E731
         n = len(panel.collection)
-        first_two = [panel.collection.records[i].path for i in (0, 1)]
-        sm = panel.view.selectionModel()
-        for row in (0, 1):
-            sm.select(panel.model.index(row), sm.SelectionFlag.Select)
-        self.assertTrue(panel.btn_remove.isVisible() or panel.btn_remove.text().endswith("（2枚）"))
-        panel.remove_selected()
-        self.assertEqual(len(panel.collection), n - 2)
-        for p in first_two:
-            self.assertTrue(Path(p).exists(), "元のファイルが削除されてはいけない")
-        # 同じフォルダーをもう一度追加しても、外した写真は戻らない
+
+        # ① クリックで選ぶ → ボタンが押せるようになる → Delete キーで外す
+        QTest.mouseClick(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, rect(1).center())
+        self.assertEqual(panel._selected_rows(), [1], "クリックで選べない")
+        self.assertTrue(panel.btn_remove.isEnabled())
+        removed_path = panel.collection.records[1].path
+        v.setFocus()
+        QTest.keyClick(v, Qt.Key.Key_Delete)
+        self.assertEqual(len(panel.collection), n - 1, "Delete キーで外せない")
+        self.assertTrue(Path(removed_path).exists(), "元のファイルが削除されてはいけない")
+
+        # ② Ctrl＋クリックで2枚選んで「選んだ写真を外す」ボタン
+        QTest.mouseClick(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, rect(0).center())
+        QTest.mouseClick(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, rect(2).center())
+        self.assertEqual(panel._selected_rows(), [0, 2])
+        QTest.mouseClick(panel.btn_remove, Qt.MouseButton.LeftButton)
+        self.assertEqual(len(panel.collection), n - 3, "ボタンで外せない")
+
+        # ③ マウスを乗せて出る ✕ をクリック
+        badge = ThumbDelegate.badge_rect(rect(0)).center()
+        QTest.mouseMove(vp, badge)
+        QTest.mouseClick(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, badge)
+        self.assertEqual(len(panel.collection), n - 4, "✕ で外せない")
+
+        # ④ 同じフォルダーをもう一度追加しても、外した写真は戻らない
         panel.add_sources([str(self.photos)])
         self.assertTrue(pump(lambda: not panel.is_busy()))
-        self.assertEqual(len(panel.collection), n - 2)
+        self.assertEqual(len(panel.collection), n - 4)
 
     def test_4_text_input_limit(self):
         self.w.mode_tabs.setCurrentIndex(1)

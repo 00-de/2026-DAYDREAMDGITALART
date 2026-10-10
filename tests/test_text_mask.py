@@ -98,6 +98,10 @@ class MaskTest(unittest.TestCase):
         self.assertNotIn("Pl|us", joined)
         self.assertTrue(any("DayDream" in ln for ln in r.lines))
 
+    def test_kana_words_not_split(self):
+        r = tm.render_text_mask("DayDream Plus ありがとう", tm.TextMaskSettings(canvas_size=(1920, 1080)))
+        self.assertTrue(any("ありがとう" in ln for ln in r.lines), r.lines)
+
     def test_no_punctuation_at_line_start(self):
         r = tm.render_text_mask("みんなありがとう。またライブで会おうね、待ってるよ！")
         for ln in r.lines[1:]:

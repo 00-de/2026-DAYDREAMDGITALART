@@ -85,7 +85,7 @@ class RenderTest(unittest.TestCase):
             checked.add(key)
             r = self.r.with_settings(an.AnimationSettings(**{**self.st.__dict__, "preset": p.index}))
             last = frame_array(r.frame(r.frame_count - 1))
-            mid = frame_array(r.frame(r.n_anim // 3))
+            mid = frame_array(r.frame(max(1, r.n_anim // 8)))  # 動きの序盤（速い種類でもまだ動いている時点）
             if final is None:
                 final = last
             self.assertLess(np.abs(last - final).mean(), 1.0, f"{p.name}：最後の形が違う")
