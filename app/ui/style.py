@@ -13,6 +13,9 @@ QGroupBox {{
     background: #FFFFFF; border: 1px solid #E3DEF0; border-radius: 10px;
     margin-top: 14px; padding: 12px 10px 10px 10px; font-weight: 600; color: #2B2340;
 }}
+QGroupBox#collectionBox[dropping="true"] {{
+    border: 2px dashed {ACCENT}; background: #F4EFFF;
+}}
 QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 4px; }}
 QTabWidget::pane {{ border: 1px solid #E3DEF0; border-radius: 10px; background: #FFFFFF; top: -1px; }}
 QTabBar::tab {{

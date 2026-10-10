@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtCore import QEvent, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QFileDialog, QFormLayout,
@@ -112,6 +112,9 @@ class MainWindow(QMainWindow):
 
         self._load_fonts()
         self.setAcceptDrops(True)
+        self._drop_leave_timer = QTimer(self, singleShot=True, interval=120)
+        self._drop_leave_timer.timeout.connect(self._end_drag_hint)
+        QApplication.instance().installEventFilter(self)  # 画面全体のドラッグ＆ドロップを受け取る
         if check_updates_on_start:  # 前回使った写真を自動で読み込む（解析結果の保存庫があるので速い）
             QTimer.singleShot(600, self.collection_panel.restore_previous)
         self._update_photo_summary()
@@ -723,6 +726,7 @@ class MainWindow(QMainWindow):
             self.collection_panel.cancel()  # 読み込み中に閉じても安全に止める
         if self._gen_worker:
             self._gen_worker.cancel()
+        QApplication.instance().removeEventFilter(self)
         self._save_settings()
         for w in list(self._active_workers):
             w.cancel()
@@ -887,32 +891,59 @@ class MainWindow(QMainWindow):
 
     # ==================================================================
     # ドラッグ＆ドロップ
+    #   画面のどの部品（サムネイル一覧・プレビュー・入力欄・数値欄など）の上に落としても、
+    #   アプリ全体で受け取って振り分ける。文字入力欄にファイル名が入ってしまうこともない。
     # ==================================================================
+    _DRAG_TYPES = (QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop, QEvent.Type.DragLeave)
+
     @staticmethod
     def _local_paths(mime) -> list[str]:
-        return [u.toLocalFile() for u in mime.urls() if u.isLocalFile()] if mime.hasUrls() else []
+        return [u.toLocalFile() for u in mime.urls() if u.isLocalFile()] if mime and mime.hasUrls() else []
 
-    def dragEnterEvent(self, e) -> None:
-        if self._local_paths(e.mimeData()):
-            e.acceptProposedAction()
+    def _drop_goes_to_main_photo(self, widget: QWidget, pos, paths: list[str]) -> bool:
+        """写真モザイクのプレビュー欄に写真を1枚だけ落としたときは、メイン写真にする。"""
+        if self.mode_tabs.currentIndex() != 0 or len(paths) != 1:
+            return False
+        p = Path(paths[0])
+        if not (p.is_file() and p.suffix.lower() in config.CANDIDATE_EXTENSIONS):
+            return False
+        vp = self.preview.viewport()
+        local = vp.mapFromGlobal(widget.mapToGlobal(pos))
+        return vp.rect().contains(local)
 
-    def dragMoveEvent(self, e) -> None:
-        if self._local_paths(e.mimeData()):
-            e.acceptProposedAction()
+    def eventFilter(self, obj, ev) -> bool:
+        if ev.type() not in self._DRAG_TYPES or not isinstance(obj, QWidget) or obj.window() is not self:
+            return super().eventFilter(obj, ev)
+        if ev.type() == QEvent.Type.DragLeave:
+            self._drop_leave_timer.start()  # 部品の間を移動しただけなら、すぐ次の DragEnter が来る
+            return False
+        paths = self._local_paths(ev.mimeData())
+        if not paths:
+            return False  # 写真ファイル以外（文字など）は通常どおり
+        pos = ev.position().toPoint()
+        to_main = self._drop_goes_to_main_photo(obj, pos, paths)
+        if ev.type() in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+            ev.setDropAction(Qt.DropAction.CopyAction)
+            ev.accept()
+            self._drop_leave_timer.stop()
+            self.collection_panel.set_drop_highlight(not to_main, len(paths))
+            self.statusBar().showMessage("離すと「メイン写真」になります" if to_main else
+                                         f"離すと、タイル用の写真に追加されます（{len(paths)}個）")
+            return True
+        # Drop
+        ev.setDropAction(Qt.DropAction.CopyAction)
+        ev.accept()
+        self.collection_panel.set_drop_highlight(False)
+        self.statusBar().clearMessage()
+        if to_main:
+            self.load_main_photo(paths[0])
+        else:
+            self.collection_panel.add_sources(paths)
+        return True
 
-    def dropEvent(self, e) -> None:
-        items = self._local_paths(e.mimeData())
-        if not items:
-            return
-        e.acceptProposedAction()
-        # 写真モザイクのプレビュー欄に写真を1枚落とした → メイン写真にする
-        over_preview = self.preview.rect().contains(self.preview.mapFrom(self, e.position().toPoint()))
-        if (over_preview and self.mode_tabs.currentIndex() == 0 and len(items) == 1
-                and Path(items[0]).is_file()
-                and Path(items[0]).suffix.lower() in config.CANDIDATE_EXTENSIONS):
-            self.load_main_photo(items[0])
-            return
-        self.collection_panel.add_sources(items)
+    def _end_drag_hint(self) -> None:
+        self.collection_panel.set_drop_highlight(False)
+        self.statusBar().clearMessage()
 
     # ==================================================================
     # 自動更新

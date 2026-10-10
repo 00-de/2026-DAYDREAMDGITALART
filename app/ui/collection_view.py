@@ -128,6 +128,8 @@ class CollectionPanel(QGroupBox):
 
     def __init__(self, settings: QSettings, parent=None):
         super().__init__("① 写真コレクション（タイルに使う写真・最大2,000枚）", parent)
+        self.setObjectName("collectionBox")
+        self.setProperty("dropping", False)
         self.settings = settings
         self.collection = col.PhotoCollection()
         self._worker: workers.Worker | None = None
@@ -292,6 +294,21 @@ class CollectionPanel(QGroupBox):
         self.settings.setValue("collection/sources", self.collection.sources)
 
     # ---- 表示 ----
+    def set_drop_highlight(self, on: bool, count: int = 0) -> None:
+        """写真をドラッグ中、この欄を点線で囲んで「ここに追加されます」と案内する。"""
+        if bool(self.property("dropping")) == on and not on:
+            return
+        self.setProperty("dropping", on)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        if on:
+            self.lbl_count.setText(f"⬇ ここで離すと、タイル用の写真に追加されます（{count}個）")
+            self.lbl_count.setObjectName("summary")
+            self.lbl_count.style().unpolish(self.lbl_count)
+            self.lbl_count.style().polish(self.lbl_count)
+        else:
+            self._update_label()
+
     def is_busy(self) -> bool:
         return self._worker is not None
 

@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PIL import Image  # noqa: E402
 from PySide6.QtCore import QMimeData, QPointF, QSettings, Qt, QThreadPool, QUrl  # noqa: E402
-from PySide6.QtGui import QDropEvent  # noqa: E402
+from PySide6.QtGui import QDragEnterEvent, QDropEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from app import config, text_mask  # noqa: E402
@@ -60,12 +60,20 @@ class GuiTest(unittest.TestCase):
         cls.tmp.cleanup()
 
     def _drop(self, paths, target):
+        """Windows と同じ順番（DragEnter → Drop）で、指定した部品にイベントを届ける。"""
+        if hasattr(target, "viewport"):
+            target = target.viewport()
         mime = QMimeData()
         mime.setUrls([QUrl.fromLocalFile(str(p)) for p in paths])
-        pos = target.mapTo(self.w, target.rect().center())
-        ev = QDropEvent(QPointF(pos), Qt.DropAction.CopyAction, mime,
-                        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
-        self.w.dropEvent(ev)
+        center = target.rect().center()
+        enter = QDragEnterEvent(center, Qt.DropAction.CopyAction, mime,
+                                Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(target, enter)
+        self.assertTrue(enter.isAccepted(), f"{type(target).__name__} がドラッグを受け付けなかった")
+        drop = QDropEvent(QPointF(center), Qt.DropAction.CopyAction, mime,
+                          Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(target, drop)
+        self.assertTrue(drop.isAccepted())
 
     def test_1_drop_folder_adds_to_collection(self):
         panel = self.w.collection_panel
@@ -86,6 +94,43 @@ class GuiTest(unittest.TestCase):
         self.assertTrue(pump(lambda: not panel.is_busy()))
         self.assertEqual(len(panel.collection), 12)
         self.assertEqual(len(POPUPS), n_popups, "登録済みの写真で警告を出してはいけない")
+
+    def test_3b_drop_on_any_widget_goes_to_collection(self):
+        panel = self.w.collection_panel
+        extra = Path(self.tmp.name) / "追加"
+        extra.mkdir(exist_ok=True)
+        targets = [("サムネイル一覧", panel.view), ("文字の入力欄", self.w.ed_text),
+                   ("数値欄", self.w.sp_tile), ("ボタン", self.w.btn_reset)]
+        for i, (label, widget) in enumerate(targets):
+            imgs = []
+            for k in range(3):  # 何枚かまとめてドロップ
+                f = extra / f"{label}_{k}.png"
+                Image.new("RGB", (40, 40), (i * 60, k * 80, 200)).save(f)
+                imgs.append(f)
+            before = len(panel.collection)
+            if label == "文字の入力欄":
+                self.w.mode_tabs.setCurrentIndex(1)
+                text_before = self.w.ed_text.toPlainText()
+            self._drop(imgs, widget)
+            self.assertTrue(pump(lambda: not panel.is_busy() and len(panel.collection) == before + 3), label)
+            if label == "文字の入力欄":
+                self.assertEqual(self.w.ed_text.toPlainText(), text_before, "入力欄にファイル名が入ってしまった")
+                self.w.mode_tabs.setCurrentIndex(0)
+
+    def test_3c_multiple_images_on_preview_go_to_collection(self):
+        panel = self.w.collection_panel
+        self.w.mode_tabs.setCurrentIndex(0)
+        extra = Path(self.tmp.name) / "プレビューへ"
+        extra.mkdir(exist_ok=True)
+        imgs = []
+        for k in range(2):
+            f = extra / f"pv{k}.jpg"
+            Image.new("RGB", (40, 40), (k * 120, 30, 90)).save(f, "JPEG")
+            imgs.append(f)
+        before = len(panel.collection)
+        self._drop(imgs, self.w.preview)
+        self.assertTrue(pump(lambda: not panel.is_busy() and len(panel.collection) == before + 2))
+        self.assertFalse(panel.property("dropping"), "ドロップ後も強調表示が残っている")
 
     def test_4_text_input_limit(self):
         self.w.mode_tabs.setCurrentIndex(1)
