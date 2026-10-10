@@ -488,13 +488,31 @@ def recommend_tile_px(result: TextMaskResult, min_tiles_per_char: int = MIN_TILE
 
 MIN_GRID_SHORT_SIDE = 60  # 文字が少なくても「写真のモザイク」に見えるよう、短い辺に最低このタイル数
 
+# 「写真の大きさ」の段階：(画面に出す名前, 1文字の高さに並べるタイル数, 短い辺の最低タイル数)
+# タイルが大きいほど1枚1枚の写真がよく見えるが、画数の多い漢字は読みにくくなる
+TILE_SIZE_LEVELS = [
+    ("細かい（文字がいちばんくっきり）", 16, 60),
+    ("標準", 12, 40),
+    ("大きめ（写真がよく見える）", 9, 24),
+    ("特大（写真が主役・短い文字向け）", 7, 14),
+]
+DEFAULT_TILE_LEVEL = 1
 
-def auto_grid(result: TextMaskResult, min_short: int = MIN_GRID_SHORT_SIDE) -> tuple[int, int]:
-    """文字が読めて、写真のモザイクらしく見えるタイル数（横, 縦）を自動で決める。"""
-    cols, rows = grid_size_for(result.mask.size, recommend_tile_px(result))
+
+def auto_grid(result: TextMaskResult, level: int | None = None,
+              min_short: int | None = None) -> tuple[int, int]:
+    """文字が読めて、写真のモザイクらしく見えるタイル数（横, 縦）を自動で決める。
+
+    level：写真の大きさ（0＝細かい 〜 3＝特大）。
+    """
+    lv = TILE_SIZE_LEVELS[DEFAULT_TILE_LEVEL if level is None else max(0, min(level, len(TILE_SIZE_LEVELS) - 1))]
+    per_char, short_min = lv[1], lv[2]
+    if min_short is not None:
+        short_min = min_short
+    cols, rows = grid_size_for(result.mask.size, recommend_tile_px(result, per_char))
     short = min(cols, rows)
-    if short < min_short:
-        k = min_short / short
+    if short < short_min:
+        k = short_min / short
         cols, rows = round(cols * k), round(rows * k)
     return cols, rows
 

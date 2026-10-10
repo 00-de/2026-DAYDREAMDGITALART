@@ -69,7 +69,8 @@ class RenderTest(unittest.TestCase):
         """最後のコマで、文字の升目が明るく（写真）、背景が暗い＝文字ができあがっている。"""
         last = frame_array(self.r.frame(self.r.frame_count - 1)).mean(axis=2)
         lay = self.r.layout
-        cell = np.array([[last[int(rr * self.r.cell_h + self.r.cell_h / 2), int(cc * self.r.cell_w + self.r.cell_w / 2)]
+        ox, oy, T = self.r.offset[0], self.r.offset[1], self.r.tile
+        cell = np.array([[last[oy + rr * T + T // 2, ox + cc * T + T // 2]
                           for cc in range(lay.cols)] for rr in range(lay.rows)]).reshape(-1)
         self.assertGreater(cell[lay.is_text].mean(), 120)
         self.assertLess(cell[~lay.is_text].mean(), 40)
@@ -91,6 +92,46 @@ class RenderTest(unittest.TestCase):
             self.assertLess(np.abs(last - final).mean(), 1.0, f"{p.name}：最後の形が違う")
             self.assertGreater(np.abs(mid - last).mean(), 1.0, f"{p.name}：動いていない")
         self.assertEqual(len(checked), 40)
+
+    def test_tile_levels_make_tiles_bigger(self):
+        """「写真の大きさ」を上げるほど、1マス（写真1枚）が大きくなる。"""
+        sizes = []
+        for lv in range(4):
+            st = an.AnimationSettings(**{**self.st.__dict__, "width": 540, "height": 960, "tile_level": lv})
+            r = an.build_renderer("DayDream Plus", tm.TextMaskSettings(), self.records, (255, 255, 255),
+                                  (10, 10, 30), False, st)
+            sizes.append(r.tile)
+            self.assertEqual(r.offset[0] * 2 + r.layout.cols * r.tile, 540 - (540 - r.layout.cols * r.tile) % 2)
+        self.assertEqual(sizes, sorted(sizes))
+        self.assertGreater(sizes[3], sizes[0] * 1.8, sizes)
+
+    def test_landed_tiles_are_pixel_exact(self):
+        """着地した写真は、読み込んだ写真そのもの（にじみなし）で描かれる。"""
+        r = self.r
+        last = frame_array(r.frame(r.frame_count - 1))
+        ox, oy, T = r.offset[0], r.offset[1], r.tile
+        lay = r.layout
+        i = int(np.where(lay.is_text)[0][0])
+        rr, cc = divmod(i, lay.cols)
+        got = last[oy + rr * T: oy + rr * T + T, ox + cc * T: ox + cc * T + T]
+        ti, tint = r.items[0]
+        exp = np.asarray(ve.qimage_to_pil(r.exact[ti]), dtype=float)
+        if tint is not None:
+            a = tint.alpha() / 255
+            exp = exp * (1 - a) + np.array([tint.red(), tint.green(), tint.blue()]) * a
+        self.assertLess(np.abs(got - exp).mean(), 2.0)
+
+    def test_flying_tiles_are_bigger(self):
+        """飛んでくる途中の写真は、着地したときより大きい（fly_scale）。"""
+        st = an.AnimationSettings(**{**self.st.__dict__, "preset": 0, "fly_scale": 3.0})
+        r = self.r.with_settings(st)
+        p, _, _, scale, _ = r._state(0.3)
+        flying = (p > 0.05) & (p < 0.6)
+        self.assertTrue(flying.any())
+        base = an.PRESETS[0].start_scale
+        self.assertGreater(float(np.median(scale[flying])), max(1.0, base) * 1.4)
+        _, _, _, scale_end, _ = r._state(1.0)
+        self.assertAlmostEqual(float(np.abs(scale_end - 1).max()), 0.0, places=3)
 
     def test_export_gif(self):
         path = ve.export_gif(self.r, str(self.out / "アニメ"))

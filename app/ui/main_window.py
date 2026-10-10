@@ -44,6 +44,7 @@ MIN_GRID_SHORT_SIDE = 60  # 文字が少なくても「写真のモザイク」�
 @dataclass
 class Defaults:
     tile_px: int = 40
+    text_tile_px: int = 60      # 文字モザイクの写真1枚の大きさ（大きいほど拡大してもくっきり）
     photo_cols: int = 100
     max_uses: int = 5
     color_match: int = 70
@@ -346,8 +347,15 @@ class MainWindow(QMainWindow):
         self.sp_text_cols = _spin(20, 400, 120, " 枚")
         self.sp_text_cols.setEnabled(False)
         self.chk_auto_tiles.toggled.connect(lambda on: self.sp_text_cols.setEnabled(not on))
-        self.sp_text_tile = _spin(10, 200, D.tile_px, " px")
+        self.sp_text_tile = _spin(10, 300, D.text_tile_px, " px")
+        self.sp_text_tile.setToolTip("保存する画像での写真1枚の大きさです。大きいほど、拡大したときに写真がくっきり見えます。")
+        self.cb_text_level = QComboBox()
+        for name, _pc, _ms in text_mask.TILE_SIZE_LEVELS:
+            self.cb_text_level.addItem(name)
+        self.cb_text_level.setCurrentIndex(text_mask.DEFAULT_TILE_LEVEL)
+        self.chk_auto_tiles.toggled.connect(self.cb_text_level.setEnabled)
         f4.addRow("", self.chk_auto_tiles)
+        f4.addRow("写真の大きさ", self.cb_text_level)
         f4.addRow("横のタイル数", self.sp_text_cols)
         f4.addRow("タイル1枚の大きさ", self.sp_text_tile)
         v.addWidget(g4)
@@ -374,6 +382,18 @@ class MainWindow(QMainWindow):
                           ("1920×1080（横・YouTube）", (1920, 1080)), ("1080×1080（正方形・Instagram）", (1080, 1080))):
             self.cb_anim_size.addItem(label, wh)
         f5.addRow("動画の大きさ", self.cb_anim_size)
+        self.cb_anim_level = QComboBox()
+        for name, _pc, _ms in text_mask.TILE_SIZE_LEVELS:
+            self.cb_anim_level.addItem(name)
+        self.cb_anim_level.setCurrentIndex(2)  # 大きめ
+        self.cb_anim_level.setToolTip("文字を作る写真1枚1枚の大きさです。大きいほど写真がよく見え、細かいほど文字がくっきりします。")
+        f5.addRow("写真の大きさ", self.cb_anim_level)
+        self.cb_anim_fly = QComboBox()
+        for name, val in animation.FLY_SCALES:
+            self.cb_anim_fly.addItem(name, val)
+        self.cb_anim_fly.setCurrentIndex(2)  # 2倍
+        self.cb_anim_fly.setToolTip("飛んでくる途中の写真を大きく見せ、着地すると元の大きさに戻ります。")
+        f5.addRow("飛んでくる大きさ", self.cb_anim_fly)
         row6 = QHBoxLayout()
         self.sp_anim_sec = _spin(2, 20, 5, " 秒")
         self.sp_anim_hold = _spin(0, 10, 2, " 秒")
@@ -406,7 +426,8 @@ class MainWindow(QMainWindow):
         for sig in (self.sl_weight.valueChanged, self.sl_spacing.valueChanged, self.sl_linesp.valueChanged,
                     self.sp_fontsize.valueChanged, self.chk_autosize.toggled, self.rb_multi.toggled,
                     self.cb_canvas.currentIndexChanged, self.chk_auto_tiles.toggled,
-                    self.sp_text_cols.valueChanged, self.sp_text_tile.valueChanged):
+                    self.sp_text_cols.valueChanged, self.sp_text_tile.valueChanged,
+                    self.cb_text_level.currentIndexChanged):
             sig.connect(self._schedule_text_preview)
         return w
 
@@ -623,12 +644,12 @@ class MainWindow(QMainWindow):
             self._text_timer.start()
 
     @staticmethod
-    def build_text_preview(text, settings, auto_tiles, manual_cols, text_rgb, bg_rgb):
+    def build_text_preview(text, settings, auto_tiles, manual_cols, text_rgb, bg_rgb, level=None):
         """（作業係で実行）文字マスクを作り、タイルの升目にした見え方の画像を作る。"""
         res = text_mask.render_text_mask(text, settings)
         cw, ch = res.mask.size
         if auto_tiles:
-            cols, rows = text_mask.auto_grid(res)
+            cols, rows = text_mask.auto_grid(res, level)
         else:
             cols = manual_cols
             rows = max(1, round(cols * ch / cw))
@@ -649,7 +670,7 @@ class MainWindow(QMainWindow):
         self._text_job += 1
         job = self._text_job
         args = (text, self._text_settings(), self.chk_auto_tiles.isChecked(), self.sp_text_cols.value(),
-                self._text_color.getRgb()[:3], self._bg_color.getRgb()[:3])
+                self._text_color.getRgb()[:3], self._bg_color.getRgb()[:3], self.cb_text_level.currentIndex())
         self.lbl_preview_info.setText("プレビューを作成中…")
         self._run(lambda: self.build_text_preview(*args),
                   lambda r: self._on_text_preview(job, r),
@@ -759,7 +780,10 @@ class MainWindow(QMainWindow):
         self.rb_multi.setChecked(True)
         self.rb_bg_solid.setChecked(True)
         self.chk_auto_tiles.setChecked(True)
-        self.sp_text_tile.setValue(D.tile_px)
+        self.sp_text_tile.setValue(D.text_tile_px)
+        self.cb_text_level.setCurrentIndex(text_mask.DEFAULT_TILE_LEVEL)
+        self.cb_anim_level.setCurrentIndex(2)
+        self.cb_anim_fly.setCurrentIndex(2)
         self.cb_canvas.setCurrentIndex(0)
         self._text_color, self._bg_color = QColor(D.text_color), QColor(D.bg_color)
         self._refresh_swatches()
@@ -826,12 +850,13 @@ class MainWindow(QMainWindow):
             text = self.ed_text.toPlainText()
             ms = self._text_settings()
             auto, manual = self.chk_auto_tiles.isChecked(), self.sp_text_cols.value()
+            level = self.cb_text_level.currentIndex()
             tile_px = self.sp_text_tile.value()
             text_rgb, bg_rgb = self._text_color.getRgb()[:3], self._bg_color.getRgb()[:3]
             bg_photos = self.rb_bg_photo.isChecked()
 
             def fn(progress=None, is_cancelled=None):
-                _, cols, rows, _ = MainWindow.build_text_preview(text, ms, auto, manual, text_rgb, bg_rgb)
+                _, cols, rows, _ = MainWindow.build_text_preview(text, ms, auto, manual, text_rgb, bg_rgb, level)
                 st = mosaic_engine.TextMosaicSettings(cols=cols, rows=rows, tile_px=tile_px, text_color=text_rgb,
                                                       bg_color=bg_rgb, bg_photos=bg_photos, seed=seed)
                 return mosaic_engine.generate_text_mosaic(text, ms, records, st, progress, is_cancelled)
@@ -901,7 +926,7 @@ class MainWindow(QMainWindow):
         if not self._result or self._result_mode != self.mode_tabs.currentIndex():
             return
         self.tb_after.setChecked(True)
-        self.preview.set_image(self._result.preview)
+        self.preview.set_image(self._result.preview, full=self._result.image)
         self.lbl_preview_info.setText("生成後：" + "　".join(f"{k} {v}" for k, v in self._result.stats.items()))
 
     def save_result(self) -> None:
@@ -954,10 +979,12 @@ class MainWindow(QMainWindow):
         st = animation.AnimationSettings(width=w, height=h, fps=self.cb_anim_fps.currentData(),
                                          duration=float(self.sp_anim_sec.value()),
                                          hold=float(self.sp_anim_hold.value()),
-                                         preset=self.cb_anim.currentIndex(), seed=seed)
+                                         preset=self.cb_anim.currentIndex(), seed=seed,
+                                         tile_level=self.cb_anim_level.currentIndex(),
+                                         fly_scale=float(self.cb_anim_fly.currentData()))
         ms = self._text_settings()
         text = self.ed_text.toPlainText()
-        key = (text, w, h, ms.font.path if ms.font else "", ms.weight, ms.letter_spacing, ms.line_spacing,
+        key = (text, w, h, st.tile_level, ms.font.path if ms.font else "", ms.weight, ms.letter_spacing, ms.line_spacing,
                ms.multiline, ms.font_size, self._text_color.name(), self._bg_color.name(),
                self.rb_bg_photo.isChecked(), len(self.collection_panel.collection),
                tuple(r.sha1 for r in self.collection_panel.collection.records[:50]))

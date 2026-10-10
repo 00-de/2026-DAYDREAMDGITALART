@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
+from PIL import Image
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 
@@ -183,49 +184,74 @@ class AnimationSettings:
     hold: float = 1.5          # できあがった文字を見せる時間（秒）
     preset: int = 0
     seed: int = 0
+    tile_level: int = 2        # 写真の大きさ（0＝細かい〜3＝特大）。初期値は「大きめ」
+    fly_scale: float = 2.0     # 飛んでくる途中の写真の大きさ（着地すると1倍に戻る）
+
+
+FLY_SCALES = [("等倍", 1.0), ("1.5倍", 1.5), ("2倍（おすすめ）", 2.0), ("3倍（迫力）", 3.0)]
+HI_RES_MAX = 192            # 飛んでくる途中に使う高画質版の最大サイズ（px）
+HI_RES_BUDGET = 160_000_000  # 高画質版に使うメモリの上限（バイト）
 
 
 class AnimationRenderer:
     """フレーム（1コマ）を作る係。frame(番号) で QImage を返す。"""
 
     def __init__(self, layout: mosaic_engine.TextLayout, tiles: dict[int, np.ndarray | None],
-                 bg_color: tuple[int, int, int], st: AnimationSettings):
+                 bg_color: tuple[int, int, int], st: AnimationSettings, tile: int | None = None,
+                 offset: tuple[int, int] = (0, 0), _cache: dict | None = None):
+        """tiles：写真ごとの高画質版（正方形の numpy 配列）。tile：動画上の1マスの大きさ（整数px）。"""
         self.st = st
         self.layout, self.tiles, self.bg_color = layout, tiles, tuple(bg_color)
         self.W, self.H = st.width, st.height
         self.bg = QColor(*bg_color)
         self.preset = PRESETS[st.preset % len(PRESETS)]
         cols, rows = layout.cols, layout.rows
-        cw, ch = self.W / cols, self.H / rows
-        self.cell_w, self.cell_h = cw, ch
+        if tile is None:  # 古い呼び出し方との互換
+            tile = max(1, int(min(self.W / cols, self.H / rows)))
+        self.tile, self.offset = tile, offset
+        self.cell_w = self.cell_h = float(tile)
+        ox, oy = offset
 
-        self.items: list[QImage] = []     # 文字の升目（飛んでくる）
+        # 写真ごとに「ぴったりサイズ（着地用・くっきり）」と「高画質版（飛行中の拡大用）」を1回だけ作る
+        self._cache = _cache if _cache is not None else {}
+        if "imgs" not in self._cache:
+            exact, hi = {}, {}
+            for t, arr in tiles.items():
+                if arr is None:
+                    continue
+                pil = Image.fromarray(arr, "RGB")
+                hi[t] = _np_to_qimage(arr)
+                exact[t] = _np_to_qimage(np.asarray(
+                    pil if pil.width == tile else pil.resize((tile, tile), Image.Resampling.LANCZOS)))
+            self._cache["imgs"] = (exact, hi)
+        self.exact, self.hi = self._cache["imgs"]
+
+        self.items: list[tuple[int, QColor | None]] = []   # 文字の升目：(写真番号, 色寄せ)
         tgt = []
-        self.bg_items: list[tuple[QRectF, QImage]] = []  # 背景の写真（最後にふわっと現れる）
+        self.bg_items: list[tuple[QRectF, int, QColor | None]] = []
         self.solid_text: list[tuple[QRectF, QColor]] = []
         for i in range(cols * rows):
             r, c = divmod(i, cols)
-            rect = QRectF(c * cw, r * ch, cw + 0.6, ch + 0.6)  # 0.6px 重ねて隙間を防ぐ
+            x, y = ox + c * tile, oy + r * tile
+            rect = QRectF(x, y, tile, tile)
             t = int(layout.assign[i])
-            tile = tiles.get(t) if t >= 0 else None
-            if tile is None:
+            if t < 0 or t not in self.exact:
                 if layout.is_text[i]:
                     self.solid_text.append((rect, QColor(*[int(v) for v in layout.solid[i]])))
                 continue
             a = float(layout.tint_alpha[i])
-            arr = (tile * (1 - a) + layout.tint_rgb[i] * a).astype(np.uint8) if a > 0.004 else tile
-            img = _np_to_qimage(arr)
+            tint = QColor(*[int(v) for v in layout.tint_rgb[i]], int(round(a * 255))) if a > 0.004 else None
             if layout.is_text[i]:
-                self.items.append(img)
-                tgt.append((c * cw, r * ch))
+                self.items.append((t, tint))
+                tgt.append((x, y))
             else:
-                self.bg_items.append((rect, img))
+                self.bg_items.append((rect, t, tint))
         if not self.items:
             raise MosaicError("文字の部分に写真がありません。", "タイル用の写真を追加してください。")
         self.tgt = np.array(tgt, dtype=np.float64)
         rng = np.random.default_rng(st.seed * 7919 + self.preset.index)
         self.start = _start_positions(self.preset.origin, self.tgt, self.W, self.H, rng)
-        self.delay = _delays(self.preset.order, self.tgt + [cw / 2, ch / 2], self.W, self.H, rng)
+        self.delay = _delays(self.preset.order, self.tgt + [tile / 2, tile / 2], self.W, self.H, rng)
         self.rot_sign = rng.choice([-1.0, 1.0], len(self.tgt))
         self.arc_amp = rng.uniform(0.15, 0.35, len(self.tgt)) * math.hypot(self.W, self.H) * rng.choice([-1, 1], len(self.tgt))
         spread = 0.12 if self.preset.order == "together" else 0.55
@@ -236,9 +262,9 @@ class AnimationRenderer:
 
     def with_settings(self, st: AnimationSettings) -> "AnimationRenderer":
         """写真を読み直さずに、動き方・長さ・fps だけ変えた係を作る（同じ動画サイズに限る）。"""
-        if (st.width, st.height) != (self.st.width, self.st.height):
-            raise ValueError("動画サイズが違います")
-        return AnimationRenderer(self.layout, self.tiles, self.bg_color, st)
+        if (st.width, st.height, st.tile_level) != (self.st.width, self.st.height, self.st.tile_level):
+            raise ValueError("動画サイズ・写真の大きさが違います")
+        return AnimationRenderer(self.layout, self.tiles, self.bg_color, st, self.tile, self.offset, self._cache)
 
     @property
     def frame_count(self) -> int:
@@ -265,7 +291,11 @@ class AnimationRenderer:
             ca, sa = np.cos(ang), np.sin(ang)
             pos = self.tgt + np.stack([off[:, 0] * ca - off[:, 1] * sa, off[:, 0] * sa + off[:, 1] * ca], 1)
         rot = pr.rotation * (1 - np.clip(e, 0, 1)) * self.rot_sign
-        scale = pr.start_scale + (1 - pr.start_scale) * np.clip(e, 0, 1.2)
+        base = pr.start_scale + (1 - pr.start_scale) * np.clip(e, 0, 1.2)
+        # 飛んでくる途中は大きく見せ、着地に近づくにつれてゆっくり元の大きさへ（全200種類に共通）
+        ps = np.clip(p, 0, 1)
+        boost = 1 + (max(1.0, self.st.fly_scale) - 1) * (1 - ps ** 2.2)
+        scale = np.minimum(8.0, base * boost)
         alpha = np.clip(p * 3, 0, 1) if pr.fade else np.where(p > 0, 1.0, 0.0 if pr.origin == "zoom" else 1.0)
         return p, pos, rot, scale, alpha
 
@@ -284,30 +314,41 @@ class AnimationRenderer:
             ba = float(np.clip((t - 0.7) / 0.3, 0, 1))
             if ba > 0:
                 painter.setOpacity(ba)
-                for rect, im in self.bg_items:
-                    painter.drawImage(rect, im)
+                for rect, ti, tint in self.bg_items:
+                    painter.drawImage(rect, self.exact[ti])
+                    if tint is not None:
+                        painter.fillRect(rect, tint)
                 painter.setOpacity(1.0)
         if self.solid_text and t >= 1.0:
             for rect, col in self.solid_text:
                 painter.fillRect(rect, col)
-        cw, ch = self.cell_w + 0.6, self.cell_h + 0.6
+        T = float(self.tile)
         order = np.argsort(-p)  # 着いたタイルを先に、飛んでいるタイルを上に描く
         for i in order:
             a = alpha[i]
             if a <= 0.01:
                 continue
             x, y = pos[i]
-            s = scale[i]
+            s = float(scale[i])
+            ti, tint = self.items[i]
             if a < 0.999:
                 painter.setOpacity(float(a))
             if abs(rot[i]) < 0.5 and abs(s - 1) < 0.01:
-                painter.drawImage(QRectF(x, y, cw, ch), self.items[i])
+                # 着地：ぴったりサイズの画像を整数位置に描く（くっきり）
+                rect = QRectF(round(x), round(y), T, T)
+                painter.drawImage(rect, self.exact[ti])
+                if tint is not None:
+                    painter.fillRect(rect, tint)
             else:
+                # 飛行中：高画質版を縮小して描く（拡大してもぼやけない）
                 painter.save()
-                painter.translate(x + cw / 2, y + ch / 2)
+                painter.translate(x + T / 2, y + T / 2)
                 painter.rotate(float(rot[i]))
-                painter.scale(float(s), float(s))
-                painter.drawImage(QRectF(-cw / 2, -ch / 2, cw, ch), self.items[i])
+                painter.scale(s, s)
+                rect = QRectF(-T / 2, -T / 2, T, T)
+                painter.drawImage(rect, self.hi[ti])
+                if tint is not None:
+                    painter.fillRect(rect, tint)
                 painter.restore()
             if a < 0.999:
                 painter.setOpacity(1.0)
@@ -319,23 +360,36 @@ def build_renderer(text: str, mask_settings_base: text_mask.TextMaskSettings, re
                    text_color, bg_color, bg_photos: bool, st: AnimationSettings,
                    progress: Callable[[int, int], None] | None = None,
                    is_cancelled: Callable[[], bool] | None = None) -> AnimationRenderer:
-    """文字の配置を決め、使う写真を読み込んで、アニメーション係を用意する。"""
+    """文字の配置を決め、使う写真を読み込んで、アニメーション係を用意する。
+
+    1マスの大きさを整数ピクセルにそろえ、余りは上下左右の余白にする（写真がにじまない）。
+    """
+    def mask_settings(canvas):
+        b = mask_settings_base
+        fs = None if b.font_size is None else int(b.font_size * canvas[1] / b.canvas_size[1])
+        return text_mask.TextMaskSettings(font=b.font, canvas_size=canvas, weight=b.weight,
+                                          letter_spacing=b.letter_spacing, line_spacing=b.line_spacing,
+                                          multiline=b.multiline, margin=b.margin, font_size=fs)
+
     long_side = 2400
     if st.width >= st.height:
         canvas = (long_side, round(long_side * st.height / st.width))
     else:
         canvas = (round(long_side * st.width / st.height), long_side)
-    ms = text_mask.TextMaskSettings(
-        font=mask_settings_base.font, canvas_size=canvas, weight=mask_settings_base.weight,
-        letter_spacing=mask_settings_base.letter_spacing, line_spacing=mask_settings_base.line_spacing,
-        multiline=mask_settings_base.multiline, margin=mask_settings_base.margin,
-        font_size=None if mask_settings_base.font_size is None else int(mask_settings_base.font_size * canvas[1] / mask_settings_base.canvas_size[1]))
-    res = text_mask.render_text_mask(text, ms)
-    cols, rows = text_mask.auto_grid(res)
-    tile_px = max(4, math.ceil(max(st.width / cols, st.height / rows)))
-    s = mosaic_engine.TextMosaicSettings(cols=cols, rows=rows, tile_px=tile_px, text_color=tuple(text_color),
+    res = text_mask.render_text_mask(text, mask_settings(canvas))
+    cols0, rows0 = text_mask.auto_grid(res, st.tile_level)
+    tile = max(6, int(min(st.width / cols0, st.height / rows0)))
+    cols, rows = st.width // tile, st.height // tile
+    offset = ((st.width - cols * tile) // 2, (st.height - rows * tile) // 2)
+    m = max(1, round(long_side / max(cols, rows)))
+    ms = mask_settings((cols * m, rows * m))
+
+    s = mosaic_engine.TextMosaicSettings(cols=cols, rows=rows, tile_px=tile, text_color=tuple(text_color),
                                          bg_color=tuple(bg_color), bg_photos=bg_photos, seed=st.seed)
     lay = mosaic_engine.build_text_layout(text, ms, records, s)
     used = sorted(set(lay.assign[lay.assign >= 0].tolist()))
-    tiles, _failed = mosaic_engine._load_tiles(records, used, tile_px, progress, is_cancelled, 0, 1000, 1000)
-    return AnimationRenderer(lay, tiles, tuple(bg_color), st)
+    # 高画質版の大きさ：1マスの4倍まで（メモリの上限内で）
+    budget_side = int(math.sqrt(HI_RES_BUDGET / 4 / max(1, len(used))))
+    hi = max(tile, min(tile * 4, HI_RES_MAX, budget_side))
+    tiles, _failed = mosaic_engine._load_tiles(records, used, hi, progress, is_cancelled, 0, 1000, 1000)
+    return AnimationRenderer(lay, tiles, tuple(bg_color), st, tile, offset)

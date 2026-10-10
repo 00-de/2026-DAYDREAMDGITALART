@@ -33,22 +33,55 @@ class PreviewView(QGraphicsView):
         self.setObjectName("previewView")
         self._fit = True
         self._placeholder = "ここにプレビューが表示されます"
+        self._full: Image.Image | None = None   # 拡大したときに使う、元の大きさの画像
+        self._showing_full = False
+        self._base_w = 1                          # プレビュー画像の幅（画面上の基準）
 
     # ---- 表示 ----
-    def set_image(self, img: Image.Image | None, keep_zoom: bool = False) -> None:
+    FULL_MAX_SIDE = 12000  # 拡大用の画像の最大の長辺（メモリを使いすぎないため）
+
+    def set_image(self, img: Image.Image | None, keep_zoom: bool = False,
+                  full: Image.Image | None = None) -> None:
+        """img：表示用の縮小画像。full を渡すと、拡大したときに自動で元の大きさの画像に切り替える。"""
+        self._full = full if (full is not None and img is not None and full.width > img.width) else None
+        self._showing_full = False
+        self._item.setScale(1.0)
         if img is None:
             self._item.setPixmap(QPixmap())
             self.scene().setSceneRect(0, 0, 1, 1)
             self.viewport().update()
             return
+        self._base_w = img.width
         self._item.setPixmap(pil_to_qpixmap(img))
         self.scene().setSceneRect(self._item.boundingRect())
         if self._fit or not keep_zoom:
             self.fit()
 
+    def _maybe_show_full(self) -> None:
+        """プレビュー画像を引き伸ばして表示し始めたら、元の大きさの画像に差し替える（ぼやけ防止）。"""
+        if self._full is None or self._showing_full or self.transform().m11() <= 1.0:
+            return
+        full = self._full
+        if max(full.size) > self.FULL_MAX_SIDE:
+            full = full.copy()
+            full.thumbnail((self.FULL_MAX_SIDE, self.FULL_MAX_SIDE), Image.Resampling.LANCZOS)
+        self._item.setPixmap(pil_to_qpixmap(full))
+        self._item.setScale(self._base_w / full.width)  # 画面上の大きさは変えずに中身だけ高精細に
+        self._showing_full = True
+
+    def real_zoom(self) -> float:
+        """元の画像に対する実際の拡大率（100%＝元の画像の1ピクセルが画面の1ピクセル）。"""
+        m = self.transform().m11()
+        if self._full is not None:
+            return m * self._base_w / self._full.width
+        return m
+
     def set_qimage(self, img: QImage) -> None:
         """アニメーション再生用：QImage をそのまま表示する（変換を省いて軽くする）。"""
-        first = not self.has_image() or self._item.pixmap().size() != img.size()
+        first = (not self.has_image() or self._item.pixmap().size() != img.size()
+                 or self._full is not None or self._item.scale() != 1.0)
+        self._full, self._showing_full, self._base_w = None, False, img.width()
+        self._item.setScale(1.0)
         self._item.setPixmap(QPixmap.fromImage(img))
         if first:
             self.scene().setSceneRect(self._item.boundingRect())
@@ -67,15 +100,18 @@ class PreviewView(QGraphicsView):
         self._fit = True
         if self.has_image():
             self.fitInView(self._item, Qt.AspectRatioMode.KeepAspectRatio)
-        self.zoomChanged.emit(self.transform().m11())
+        self._maybe_show_full()
+        self.zoomChanged.emit(self.real_zoom())
 
     def zoom(self, factor: float) -> None:
         cur = self.transform().m11()
-        if not (0.05 <= cur * factor <= 20):
+        limit = 20 * (self._full.width / self._base_w if self._full is not None else 1)
+        if not (0.05 <= cur * factor <= limit):
             return
         self._fit = False
         self.scale(factor, factor)
-        self.zoomChanged.emit(self.transform().m11())
+        self._maybe_show_full()
+        self.zoomChanged.emit(self.real_zoom())
 
     def wheelEvent(self, e: QWheelEvent) -> None:
         self.zoom(1.15 if e.angleDelta().y() > 0 else 1 / 1.15)

@@ -182,7 +182,7 @@ class GuiTest(unittest.TestCase):
         from app import exporter
         self.w.mode_tabs.setCurrentIndex(0)
         self.assertTrue(pump(lambda: self.w._main_photo is not None))
-        self.w.sp_tile.setValue(10)
+        self.w.sp_tile.setValue(100)   # 2,000px 以上 → プレビュー（1,600px）より大きい
         self.w.sp_cols.setValue(20)
         self.assertTrue(self.w.btn_generate.isEnabled(), self.w.btn_generate.toolTip())
         self.w.generate()
@@ -190,6 +190,14 @@ class GuiTest(unittest.TestCase):
         self.assertIsNotNone(self.w._result)
         self.assertTrue(self.w.tb_after.isChecked())
         self.assertTrue(self.w.btn_save.isEnabled())
+        # 拡大すると、元の大きさの画像に切り替わる（ぼやけない）
+        pv = self.w.preview
+        self.assertIsNotNone(pv._full)
+        for _ in range(12):
+            pv.zoom(1.25)
+        self.assertTrue(pv._showing_full, "拡大しても元の大きさの画像に切り替わらない")
+        self.assertEqual(pv._item.pixmap().width(), self.w._result.image.width)
+        pv.fit()
         out = Path(self.tmp.name) / "保存先"
         out.mkdir()
         r = exporter.save_image(self.w._result.image, exporter.SaveOptions(str(out / "作品"), "JPEG", 90))

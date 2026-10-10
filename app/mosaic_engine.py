@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageFilter, ImageOps
 
 from . import config, image_io, sysinfo, text_mask
 from .collection import PhotoRecord
@@ -241,6 +241,8 @@ def _load_tiles(records: list[PhotoRecord], used: list[int], tile_px: int,
         try:
             li = image_io.load_image(records[i].path, max_side=tile_px * 2)
             sq = ImageOps.fit(li.image, (tile_px, tile_px), Image.Resampling.LANCZOS)
+            if tile_px >= 16:  # 縮小でぼやけた輪郭を軽く引き締める（写真がくっきり見える）
+                sq = sq.filter(ImageFilter.UnsharpMask(radius=max(0.6, tile_px / 90), percent=45, threshold=2))
             return i, np.asarray(sq, dtype=np.uint8)
         except Exception:
             return i, None
