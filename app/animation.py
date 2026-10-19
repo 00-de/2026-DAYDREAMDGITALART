@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 
@@ -185,12 +185,93 @@ class AnimationSettings:
     preset: int = 0
     seed: int = 0
     tile_level: int = 2        # 写真の大きさ（0＝細かい〜3＝特大）。初期値は「大きめ」
-    fly_scale: float = 2.0     # 飛んでくる途中の写真の大きさ（着地すると1倍に戻る）
+    fly_width: int = 150       # 飛んでくる途中の写真の横幅（px）。縦は元の写真の縦横比のまま。0＝マスと同じ
 
 
-FLY_SCALES = [("等倍", 1.0), ("1.5倍", 1.5), ("2倍（おすすめ）", 2.0), ("3倍（迫力）", 3.0)]
-HI_RES_MAX = 192            # 飛んでくる途中に使う高画質版の最大サイズ（px）
-HI_RES_BUDGET = 160_000_000  # 高画質版に使うメモリの上限（バイト）
+FLY_WIDTHS = [("マスと同じ", 0), ("100px", 100), ("150px（おすすめ）", 150), ("200px", 200), ("300px（迫力）", 300)]
+FLY_BUDGET = 260_000_000   # 飛行用の写真（何段階かの大きさを含む）に使うメモリの上限（バイト）
+SHARPEN = ImageFilter.UnsharpMask(radius=0.8, percent=45, threshold=2)
+
+
+def _resize(img: Image.Image, size: tuple[int, int]) -> Image.Image:
+    out = img.resize(size, Image.Resampling.LANCZOS)
+    return out.filter(SHARPEN) if min(size) >= 16 else out
+
+
+class FlyImage:
+    """1枚の写真の「飛行用」画像。元の縦横比のまま、大きさの違う版を何段階か持つ
+    （大きく縮めるときも、近い大きさの版から描くので、ちらつかず、くっきり）。"""
+
+    def __init__(self, pil: Image.Image, tile: int):
+        self.w0, self.h0 = pil.size
+        self.levels: list[tuple[float, QImage]] = []  # (倍率, 画像)  倍率＝元の幅に対する比
+        k = 1.0
+        im = pil
+        while True:
+            self.levels.append((k, _pil_to_qimage(im)))
+            nw, nh = im.width // 2, im.height // 2
+            if min(nw, nh) < tile:
+                break
+            im = _resize(im, (nw, nh))
+            k /= 2
+        side = min(self.w0, self.h0)
+        self.crop = ((self.w0 - side) / 2, (self.h0 - side) / 2, side)  # 着地時の正方形（中央）
+        sq = pil.crop((int(self.crop[0]), int(self.crop[1]), int(self.crop[0]) + side, int(self.crop[1]) + side))
+        self.exact = _pil_to_qimage(sq if side == tile else _resize(sq, (tile, tile)))
+
+    def pick(self, draw_w: float, src_w: float) -> tuple[float, QImage]:
+        """画面に draw_w の幅で描くとき、ちょうどよい大きさの版を選ぶ。"""
+        need = draw_w / max(1e-6, src_w)  # 元画像1pxあたりの画面px
+        best = self.levels[0]
+        for k, im in self.levels:
+            if k >= need * 0.95:
+                best = (k, im)
+        return best
+
+
+def _pil_to_qimage(im: Image.Image) -> QImage:
+    return _np_to_qimage(np.asarray(im.convert("RGB"), dtype=np.uint8))
+
+
+def load_fly_images(records: list[PhotoRecord], used: list[int], tile: int, fly_width: int,
+                    progress: Callable[[int, int], None] | None = None,
+                    is_cancelled: Callable[[], bool] | None = None) -> tuple[dict[int, Image.Image], list[str]]:
+    """使う写真を、元の縦横比のまま読み込む（横幅＝飛んでくる大きさ。最低でも1マス分は確保）。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import image_io
+    n = max(1, len(used))
+    # メモリの上限から、1枚あたりに使える画素数（4/3 は段階版のぶん）
+    per_px = FLY_BUDGET / 4 / n / (4 / 3)
+    out: dict[int, Image.Image] = {}
+    failed: list[str] = []
+
+    def load(i: int):
+        try:
+            li = image_io.load_image(records[i].path, max_side=max(fly_width, tile) * 3)
+            im = li.image
+            ar = im.height / im.width
+            w = max(fly_width, 1)
+            w = min(w, int(math.sqrt(per_px / ar)))         # メモリの上限
+            w = max(w, int(math.ceil(tile / min(1.0, ar))))  # 着地用の正方形が1マス以上になるように
+            w = min(w, im.width) if im.width >= tile and min(im.width, im.height) >= tile else w
+            h = max(1, round(w * ar))
+            return i, (im if (w, h) == im.size else _resize(im, (w, h)))
+        except Exception:
+            return i, None
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for k, (i, im) in enumerate(ex.map(load, used)):
+            if im is None:
+                failed.append(records[i].path)
+            else:
+                out[i] = im
+            if k % 20 == 0:
+                if is_cancelled and is_cancelled():
+                    raise mosaic_engine.GenerationCancelled("中止しました。")
+                if progress:
+                    progress(k, len(used))
+    return out, failed
 
 
 class AnimationRenderer:
@@ -199,7 +280,7 @@ class AnimationRenderer:
     def __init__(self, layout: mosaic_engine.TextLayout, tiles: dict[int, np.ndarray | None],
                  bg_color: tuple[int, int, int], st: AnimationSettings, tile: int | None = None,
                  offset: tuple[int, int] = (0, 0), _cache: dict | None = None):
-        """tiles：写真ごとの高画質版（正方形の numpy 配列）。tile：動画上の1マスの大きさ（整数px）。"""
+        """tiles：写真ごとの飛行用画像（元の縦横比の PIL 画像）。tile：動画上の1マスの大きさ（整数px）。"""
         self.st = st
         self.layout, self.tiles, self.bg_color = layout, tiles, tuple(bg_color)
         self.W, self.H = st.width, st.height
@@ -212,19 +293,12 @@ class AnimationRenderer:
         self.cell_w = self.cell_h = float(tile)
         ox, oy = offset
 
-        # 写真ごとに「ぴったりサイズ（着地用・くっきり）」と「高画質版（飛行中の拡大用）」を1回だけ作る
+        # 写真ごとに「着地用のぴったりサイズ」と「飛行用（縦横比そのまま・段階版つき）」を1回だけ作る
         self._cache = _cache if _cache is not None else {}
-        if "imgs" not in self._cache:
-            exact, hi = {}, {}
-            for t, arr in tiles.items():
-                if arr is None:
-                    continue
-                pil = Image.fromarray(arr, "RGB")
-                hi[t] = _np_to_qimage(arr)
-                exact[t] = _np_to_qimage(np.asarray(
-                    pil if pil.width == tile else pil.resize((tile, tile), Image.Resampling.LANCZOS)))
-            self._cache["imgs"] = (exact, hi)
-        self.exact, self.hi = self._cache["imgs"]
+        if "fly" not in self._cache:
+            self._cache["fly"] = {t: FlyImage(im, tile) for t, im in tiles.items() if im is not None}
+        self.fly: dict[int, FlyImage] = self._cache["fly"]
+        self.exact = {t: f.exact for t, f in self.fly.items()}
 
         self.items: list[tuple[int, QColor | None]] = []   # 文字の升目：(写真番号, 色寄せ)
         tgt = []
@@ -291,13 +365,21 @@ class AnimationRenderer:
             ca, sa = np.cos(ang), np.sin(ang)
             pos = self.tgt + np.stack([off[:, 0] * ca - off[:, 1] * sa, off[:, 0] * sa + off[:, 1] * ca], 1)
         rot = pr.rotation * (1 - np.clip(e, 0, 1)) * self.rot_sign
-        base = pr.start_scale + (1 - pr.start_scale) * np.clip(e, 0, 1.2)
-        # 飛んでくる途中は大きく見せ、着地に近づくにつれてゆっくり元の大きさへ（全200種類に共通）
+        T = float(self.tile)
         ps = np.clip(p, 0, 1)
-        boost = 1 + (max(1.0, self.st.fly_scale) - 1) * (1 - ps ** 2.2)
-        scale = np.minimum(8.0, base * boost)
+        if self.st.fly_width > 0:
+            # 飛んでくる途中は「横幅 fly_width・元の縦横比」、着地に近づくとゆっくり1マスの正方形へ
+            start_w = max(T, self.st.fly_width * min(3.0, max(1.0, pr.start_scale)))
+            kk = 1 - ps ** 2.2
+            width = T + (start_w - T) * kk
+            if pr.path == "bounce":  # はずむ動きは着地の直前に少しだけ大きくなる
+                width = width * (1 + 0.15 * np.clip(e - 1, 0, None) * 5)
+            mix = kk                 # 1＝写真全体、0＝中央の正方形
+        else:
+            width = T * (pr.start_scale + (1 - pr.start_scale) * np.clip(e, 0, 1.2))
+            mix = np.zeros_like(ps)
         alpha = np.clip(p * 3, 0, 1) if pr.fade else np.where(p > 0, 1.0, 0.0 if pr.origin == "zoom" else 1.0)
-        return p, pos, rot, scale, alpha
+        return p, pos, rot, width, mix, alpha
 
     def frame(self, k: int, scale_out: float = 1.0) -> QImage:
         """k 番目のフレーム。scale_out<1 でプレビュー用の小さい画像を作る。"""
@@ -305,7 +387,7 @@ class AnimationRenderer:
         img = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
         img.fill(self.bg)
         t = min(1.0, k / max(1, self.n_anim - 1))
-        p, pos, rot, scale, alpha = self._state(t)
+        p, pos, rot, width, mix, alpha = self._state(t)
         painter = QPainter(img)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.scale(scale_out, scale_out)
@@ -329,24 +411,31 @@ class AnimationRenderer:
             if a <= 0.01:
                 continue
             x, y = pos[i]
-            s = float(scale[i])
+            w, m = float(width[i]), float(mix[i])
             ti, tint = self.items[i]
             if a < 0.999:
                 painter.setOpacity(float(a))
-            if abs(rot[i]) < 0.5 and abs(s - 1) < 0.01:
-                # 着地：ぴったりサイズの画像を整数位置に描く（くっきり）
+            if abs(rot[i]) < 0.5 and abs(w - T) < 0.5 and m < 0.01:
+                # 着地：ぴったりサイズの正方形を整数位置に描く（くっきり）
                 rect = QRectF(round(x), round(y), T, T)
                 painter.drawImage(rect, self.exact[ti])
                 if tint is not None:
                     painter.fillRect(rect, tint)
             else:
-                # 飛行中：高画質版を縮小して描く（拡大してもぼやけない）
+                # 飛行中：写真全体（縦横比そのまま）→ 中央の正方形へ、なめらかに切り替える
+                f = self.fly[ti]
+                cx, cy, side = f.crop
+                sx, sy = cx * (1 - m), cy * (1 - m)
+                sw = side + (f.w0 - side) * m
+                sh = side + (f.h0 - side) * m
+                h = w * sh / sw
+                k, src_img = f.pick(w, sw)
                 painter.save()
                 painter.translate(x + T / 2, y + T / 2)
-                painter.rotate(float(rot[i]))
-                painter.scale(s, s)
-                rect = QRectF(-T / 2, -T / 2, T, T)
-                painter.drawImage(rect, self.hi[ti])
+                if abs(rot[i]) >= 0.5:
+                    painter.rotate(float(rot[i]))
+                rect = QRectF(-w / 2, -h / 2, w, h)
+                painter.drawImage(rect, src_img, QRectF(sx * k, sy * k, sw * k, sh * k))
                 if tint is not None:
                     painter.fillRect(rect, tint)
                 painter.restore()
@@ -388,8 +477,5 @@ def build_renderer(text: str, mask_settings_base: text_mask.TextMaskSettings, re
                                          bg_color=tuple(bg_color), bg_photos=bg_photos, seed=st.seed)
     lay = mosaic_engine.build_text_layout(text, ms, records, s)
     used = sorted(set(lay.assign[lay.assign >= 0].tolist()))
-    # 高画質版の大きさ：1マスの4倍まで（メモリの上限内で）
-    budget_side = int(math.sqrt(HI_RES_BUDGET / 4 / max(1, len(used))))
-    hi = max(tile, min(tile * 4, HI_RES_MAX, budget_side))
-    tiles, _failed = mosaic_engine._load_tiles(records, used, hi, progress, is_cancelled, 0, 1000, 1000)
+    tiles, _failed = load_fly_images(records, used, tile, st.fly_width, progress, is_cancelled)
     return AnimationRenderer(lay, tiles, tuple(bg_color), st, tile, offset)

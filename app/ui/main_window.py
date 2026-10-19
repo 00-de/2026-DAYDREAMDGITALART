@@ -389,11 +389,12 @@ class MainWindow(QMainWindow):
         self.cb_anim_level.setToolTip("文字を作る写真1枚1枚の大きさです。大きいほど写真がよく見え、細かいほど文字がくっきりします。")
         f5.addRow("写真の大きさ", self.cb_anim_level)
         self.cb_anim_fly = QComboBox()
-        for name, val in animation.FLY_SCALES:
+        for name, val in animation.FLY_WIDTHS:
             self.cb_anim_fly.addItem(name, val)
-        self.cb_anim_fly.setCurrentIndex(2)  # 2倍
-        self.cb_anim_fly.setToolTip("飛んでくる途中の写真を大きく見せ、着地すると元の大きさに戻ります。")
-        f5.addRow("飛んでくる大きさ", self.cb_anim_fly)
+        self.cb_anim_fly.setCurrentIndex(2)  # 150px
+        self.cb_anim_fly.setToolTip("飛んでくる途中の写真の横幅です。縦は元の写真の縦横比のまま（切り取りなし）。\n"
+                                    "着地に近づくと小さくなり、文字の1マスにぴったり収まります。")
+        f5.addRow("飛んでくる写真の横幅", self.cb_anim_fly)
         row6 = QHBoxLayout()
         self.sp_anim_sec = _spin(2, 20, 5, " 秒")
         self.sp_anim_hold = _spin(0, 10, 2, " 秒")
@@ -981,10 +982,10 @@ class MainWindow(QMainWindow):
                                          hold=float(self.sp_anim_hold.value()),
                                          preset=self.cb_anim.currentIndex(), seed=seed,
                                          tile_level=self.cb_anim_level.currentIndex(),
-                                         fly_scale=float(self.cb_anim_fly.currentData()))
+                                         fly_width=int(self.cb_anim_fly.currentData()))
         ms = self._text_settings()
         text = self.ed_text.toPlainText()
-        key = (text, w, h, st.tile_level, ms.font.path if ms.font else "", ms.weight, ms.letter_spacing, ms.line_spacing,
+        key = (text, w, h, st.tile_level, st.fly_width, ms.font.path if ms.font else "", ms.weight, ms.letter_spacing, ms.line_spacing,
                ms.multiline, ms.font_size, self._text_color.name(), self._bg_color.name(),
                self.rb_bg_photo.isChecked(), len(self.collection_panel.collection),
                tuple(r.sha1 for r in self.collection_panel.collection.records[:50]))

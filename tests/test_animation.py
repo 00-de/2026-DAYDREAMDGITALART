@@ -84,7 +84,7 @@ class RenderTest(unittest.TestCase):
             if key in checked:
                 continue
             checked.add(key)
-            r = self.r.with_settings(an.AnimationSettings(**{**self.st.__dict__, "preset": p.index}))
+            r = self.r.with_settings(an.AnimationSettings(**{**self.st.__dict__, "preset": p.index}))  # noqa
             last = frame_array(r.frame(r.frame_count - 1))
             mid = frame_array(r.frame(max(1, r.n_anim // 8)))  # 動きの序盤（速い種類でもまだ動いている時点）
             if final is None:
@@ -121,17 +121,32 @@ class RenderTest(unittest.TestCase):
             exp = exp * (1 - a) + np.array([tint.red(), tint.green(), tint.blue()]) * a
         self.assertLess(np.abs(got - exp).mean(), 2.0)
 
-    def test_flying_tiles_are_bigger(self):
-        """飛んでくる途中の写真は、着地したときより大きい（fly_scale）。"""
-        st = an.AnimationSettings(**{**self.st.__dict__, "preset": 0, "fly_scale": 3.0})
-        r = self.r.with_settings(st)
-        p, _, _, scale, _ = r._state(0.3)
-        flying = (p > 0.05) & (p < 0.6)
-        self.assertTrue(flying.any())
-        base = an.PRESETS[0].start_scale
-        self.assertGreater(float(np.median(scale[flying])), max(1.0, base) * 1.4)
-        _, _, _, scale_end, _ = r._state(1.0)
-        self.assertAlmostEqual(float(np.abs(scale_end - 1).max()), 0.0, places=3)
+    def test_flying_photos_are_150px_wide_with_aspect_ratio(self):
+        """飛んでくる途中の写真は横幅 150px・元の縦横比のまま。着地すると1マスの正方形。"""
+        st = an.AnimationSettings(**{**self.st.__dict__, "width": 1080, "height": 1920, "preset": 0,
+                                     "fly_width": 150})
+        r = an.build_renderer("ドリプラ", tm.TextMaskSettings(), self.records, (255, 255, 255),
+                              (10, 10, 30), False, st)
+        f = next(iter(r.fly.values()))
+        self.assertAlmostEqual(f.h0 / f.w0, 40 / 60, delta=0.02)    # テスト写真は 60×40（横長）
+        self.assertEqual(f.w0, min(150, 60))  # 150px で読み込む（元の写真より大きくは引き伸ばさない）
+        p, _, _, width, mix, _ = r._state(0.0)
+        start = p <= 0.0
+        self.assertTrue(np.allclose(width[start], 150 * max(1.0, an.PRESETS[0].start_scale)))
+        self.assertTrue(np.allclose(mix[start], 1.0))               # 出発時は写真全体（切り取りなし）
+        _, _, _, width_end, mix_end, _ = r._state(1.0)
+        self.assertTrue(np.allclose(width_end, r.tile, atol=0.01))
+        self.assertTrue(np.allclose(mix_end, 0.0))
+        # 飛行中のコマで、150px 前後の写真が実際に描かれている（文字の部分以外にも色がある）
+        mid = frame_array(r.frame(2))
+        self.assertGreater((np.abs(mid - [10, 10, 30]).sum(axis=2) > 30).mean(), 0.02)
+
+    def test_multi_level_source_is_used_when_shrinking(self):
+        f = next(iter(self.r.fly.values()))
+        k_big, _ = f.pick(f.w0, f.w0)
+        k_small, _ = f.pick(f.w0 / 4, f.w0)
+        self.assertEqual(k_big, 1.0)
+        self.assertLessEqual(k_small, 0.5)
 
     def test_export_gif(self):
         path = ve.export_gif(self.r, str(self.out / "アニメ"))
