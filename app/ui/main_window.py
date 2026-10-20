@@ -253,14 +253,31 @@ class MainWindow(QMainWindow):
         self.sl_match = _slider(0, 100, D.color_match)
         self.sl_edge = _slider(0, 100, D.edge)
         self.chk_border = QCheckBox("タイルの境界線を表示")
+        self.cb_fit = QComboBox()
+        for val, label in mosaic_engine.FIT_LEVELS:
+            self.cb_fit.addItem(label, val)
+        self.cb_fit.currentIndexChanged.connect(self._update_fit_hint)
+        f3.addRow("メイン画像への近さ", self.cb_fit)
         f3.addRow("同じ写真の使用回数", self.sp_uses)
         f3.addRow("色の一致度", self.sl_match)
         f3.addRow("輪郭の強調", self.sl_edge)
         f3.addRow("", self.chk_border)
-        f3.addRow(_hint("色の一致度を上げると元の写真に近づき、下げると多くの写真が使われます。"))
+        self.lbl_fit_hint = _hint("")
+        f3.addRow(self.lbl_fit_hint)
+        self._update_fit_hint()
         v.addWidget(g3)
         v.addStretch(1)
         return w
+
+    def _update_fit_hint(self) -> None:
+        fit = int(self.cb_fit.currentData() or 0)
+        self.sl_match.setEnabled(fit == 0)  # 変形するときは、色合わせは自動（色の一致度は使わない）
+        if fit:
+            self.lbl_fit_hint.setText(
+                f"写真を1枚ずつ変形（色・明るさ・明暗）して、全体表示でメイン画像に {fit}% 近づけます。"
+                "数字を下げると、拡大したときに写真の模様がよく見えます。")
+        else:
+            self.lbl_fit_hint.setText("色の一致度を上げると元の写真に近づき、下げると多くの写真が使われます。")
 
     # ---------------- 文字モザイク ----------------
     def _build_text_tab(self) -> QWidget:
@@ -803,6 +820,7 @@ class MainWindow(QMainWindow):
         self.sp_uses.setValue(D.max_uses)
         self.sl_match.setValue(D.color_match)
         self.sl_edge.setValue(D.edge)
+        self.cb_fit.setCurrentIndex(0)
         self.chk_border.setChecked(False)
         self.chk_aspect.setChecked(True)
         self.sl_weight.setValue(D.weight)
@@ -876,7 +894,7 @@ class MainWindow(QMainWindow):
             s = mosaic_engine.PhotoMosaicSettings(
                 cols=self.sp_cols.value(), rows=self.sp_rows.value(), tile_px=self.sp_tile.value(),
                 max_uses=self.sp_uses.value(), color_match=self.sl_match.value(), edge=self.sl_edge.value(),
-                border=self.chk_border.isChecked(), seed=seed)
+                border=self.chk_border.isChecked(), seed=seed, fit=int(self.cb_fit.currentData()))
             fn, args = mosaic_engine.generate_photo_mosaic, (str(self._main_photo.path), records, s)
         else:
             text = self.ed_text.toPlainText()
@@ -1018,7 +1036,7 @@ class MainWindow(QMainWindow):
         text = self.ed_text.toPlainText()
         mode = self.mode_tabs.currentIndex()
         photo = (str(self._main_photo.path) if self._main_photo else "", self.sp_uses.value(),
-                 self.sl_match.value(), self.sl_edge.value()) if mode == 0 else None
+                 self.sl_match.value(), self.sl_edge.value(), int(self.cb_fit.currentData())) if mode == 0 else None
         key = (mode, photo, text, w, h, st.tile_level, st.fly_width, ms.font.path if ms.font else "", ms.weight, ms.letter_spacing, ms.line_spacing,
                ms.multiline, ms.font_size, self._text_color.name(), self._bg_color.name(),
                self.rb_bg_photo.isChecked(), len(self.collection_panel.collection),
@@ -1048,11 +1066,12 @@ class MainWindow(QMainWindow):
         self._anim_mode = mode
         main_path = str(self._main_photo.path) if self._main_photo else ""
         uses, match, edge = self.sp_uses.value(), self.sl_match.value(), self.sl_edge.value()
+        fit = int(self.cb_fit.currentData())
 
         def build(progress=None, is_cancelled=None):
             if mode == 0:  # 写真モザイク：写真が集まって参考画像になる
                 return animation.build_photo_renderer(main_path, records, st, uses, match, edge,
-                                                      progress=progress, is_cancelled=is_cancelled)
+                                                      progress=progress, is_cancelled=is_cancelled, fit=fit)
             return animation.build_renderer(text, ms, records, text_rgb, bg_rgb, bg_photos, st,
                                             progress, is_cancelled)
 
@@ -1091,7 +1110,9 @@ class MainWindow(QMainWindow):
             self.tb_before.setChecked(False)
             self.tb_after.setChecked(False)
             self._anim_timer.start(int(1000 / r.st.fps))
-            self.lbl_preview_info.setText(f"アニメーション：{r.preset.name}")
+            near = getattr(r, "closeness", None)
+            self.lbl_preview_info.setText(f"アニメーション：{r.preset.name}"
+                                          + (f"　／　完成時のメイン画像との近さ：{near:.1f}%" if near else ""))
             self._set_anim_buttons()
 
         self._with_renderer(start)

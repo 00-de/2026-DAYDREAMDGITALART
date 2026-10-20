@@ -230,12 +230,15 @@ class GuiTest(unittest.TestCase):
         self.w.mode_tabs.setCurrentIndex(0)
         self.w.load_main_photo(str(self.photos / "p3.jpg"))
         self.assertTrue(pump(lambda: self.w._main_photo is not None))
+        self.assertEqual(self.w.cb_fit.currentData(), 99)          # 初期値：メイン画像に 99% 近づける
+        self.assertFalse(self.w.sl_match.isEnabled())               # 変形するときは色の一致度は自動
         self.w.sp_tile.setValue(100)   # 2,000px 以上 → プレビュー（1,600px）より大きい
         self.w.sp_cols.setValue(20)
         self.assertTrue(self.w.btn_generate.isEnabled(), self.w.btn_generate.toolTip())
         self.w.generate()
         self.assertTrue(pump(lambda: self.w._gen_worker is None, 60))
         self.assertIsNotNone(self.w._result)
+        self.assertIn("メイン画像との近さ", self.w._result.stats)
         self.assertTrue(self.w.tb_after.isChecked())
         self.assertTrue(self.w.btn_save.isEnabled())
         # 拡大すると、元の大きさの画像に切り替わる（ぼやけない）

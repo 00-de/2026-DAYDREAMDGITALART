@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -53,6 +53,57 @@ class MosaicTest(unittest.TestCase):
         self.assertGreater(left[0], left[2])      # 左は赤っぽい
         self.assertGreater(right[2], right[0])    # 右は青っぽい
         self.assertLessEqual(r.preview.width, me.PREVIEW_SIDE)
+
+    def _natural_tiles(self):
+        """模様のある写真（本物の写真に近い）とグラデーションのメイン写真。"""
+        root = Path(self.tmp.name)
+        tdir = root / "模様タイル"
+        if not tdir.exists():
+            tdir.mkdir()
+            rng = np.random.default_rng(5)
+            for i in range(80):
+                a = (rng.random((12, 16, 3)) * 255).astype("uint8")
+                Image.fromarray(a).resize((160, 120), Image.Resampling.BICUBIC).save(tdir / f"n{i}.jpg", quality=92)
+            g = np.zeros((300, 450, 3), "uint8")
+            g[..., 0] = np.linspace(0, 255, 450)
+            g[..., 1] = np.linspace(255, 0, 300)[:, None]
+            g[100:200, 150:300] = (250, 240, 30)     # 黄色い四角（形が出るか）
+            Image.fromarray(g).save(root / "グラデ.png")
+        cache = col.AnalysisCache(root / "c_n.sqlite")
+        recs = col.analyze_sources([str(tdir)], cache=cache).records
+        cache.close()
+        return recs, root / "グラデ.png"
+
+    def test_fit_reaches_99_percent(self):
+        """写真を変形すると、全体表示でメイン画像に 99% 近づく（オフのときより大幅に近い）。"""
+        recs, main = self._natural_tiles()
+        res = {}
+        for fit in (0, 95, 99):
+            s = me.PhotoMosaicSettings(cols=45, rows=30, tile_px=24, fit=fit, seed=2)
+            r = me.generate_photo_mosaic(str(main), recs, s)
+            res[fit] = float(r.stats["メイン画像との近さ"].split("%")[0])
+        self.assertGreaterEqual(res[99], 98.95, res)
+        self.assertGreaterEqual(res[95], 94.95, res)
+        self.assertLess(res[0], 95, res)
+
+    def test_fit_keeps_photo_texture(self):
+        """変形しても、拡大すると写真の模様が残っている（ただの元画像の拡大ではない）。"""
+        recs, main = self._natural_tiles()
+        s = me.PhotoMosaicSettings(cols=45, rows=30, tile_px=24, fit=95, edge=0, seed=2)
+        img = np.asarray(me.generate_photo_mosaic(str(main), recs, s).image, dtype=float)
+        tgt = np.asarray(ImageOps.fit(Image.open(main).convert("RGB"), (45 * 24, 30 * 24),
+                                      Image.Resampling.LANCZOS), dtype=float)
+        self.assertGreater(np.abs(img - tgt).mean(), 3.0)    # 1ピクセル単位では写真の模様がある
+
+    def test_lowpass_keeps_flat_and_matches_mean(self):
+        a = np.full((2, 10, 10, 3), 77.0, dtype=np.float32)
+        self.assertTrue(np.allclose(me._lowpass_tiles(a, 4), 77.0))
+        rng = np.random.default_rng(0)
+        b = rng.random((3, 13, 13, 3)).astype(np.float32) * 255
+        for k in (1, 2, 4):
+            lp = me._lowpass_tiles(b, k)
+            self.assertEqual(lp.shape, b.shape)
+            self.assertTrue(np.allclose(lp.mean(axis=(1, 2)), b.mean(axis=(1, 2)), atol=6))
 
     def test_usage_limit_and_no_adjacent_repeat(self):
         recs = self.records

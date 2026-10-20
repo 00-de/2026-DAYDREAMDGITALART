@@ -280,8 +280,9 @@ class AnimationRenderer:
     def __init__(self, layout: mosaic_engine.TextLayout, tiles: dict[int, np.ndarray | None],
                  bg_color: tuple[int, int, int], st: AnimationSettings, tile: int | None = None,
                  offset: tuple[int, int] = (0, 0), _cache: dict | None = None,
-                 overlay: tuple[QImage, float] | None = None):
-        """tiles：写真ごとの飛行用画像（元の縦横比の PIL 画像）。tile：動画上の1マスの大きさ（整数px）。"""
+                 overlay: tuple[QImage, float] | None = None, cell_images: dict[int, QImage] | None = None):
+        """tiles：写真ごとの飛行用画像（元の縦横比の PIL 画像）。tile：動画上の1マスの大きさ（整数px）。
+        cell_images：升目ごとの着地画像（写真モザイクで、メイン画像に合わせて変形した写真）。"""
         self.st = st
         self.layout, self.tiles, self.bg_color = layout, tiles, tuple(bg_color)
         self.W, self.H = st.width, st.height
@@ -292,6 +293,7 @@ class AnimationRenderer:
             tile = max(1, int(min(self.W / cols, self.H / rows)))
         self.tile, self.offset = tile, offset
         self.overlay = overlay  # 写真モザイク：最後に参考画像をうっすら重ねる（輪郭の強調）
+        self.cell_images = cell_images
         self.cell_w = self.cell_h = float(tile)
         ox, oy = offset
 
@@ -303,6 +305,7 @@ class AnimationRenderer:
         self.exact = {t: f.exact for t, f in self.fly.items()}
 
         self.items: list[tuple[int, QColor | None]] = []   # 文字の升目：(写真番号, 色寄せ)
+        self.item_img: list[QImage | None] = []            # 着地画像（変形した写真。無ければ写真そのもの）
         tgt = []
         self.bg_items: list[tuple[QRectF, int, QColor | None]] = []
         self.solid_text: list[tuple[QRectF, QColor]] = []
@@ -318,7 +321,9 @@ class AnimationRenderer:
             a = float(layout.tint_alpha[i])
             tint = QColor(*[int(v) for v in layout.tint_rgb[i]], int(round(a * 255))) if a > 0.004 else None
             if layout.is_text[i]:
-                self.items.append((t, tint))
+                cimg = cell_images.get(i) if cell_images else None
+                self.items.append((t, None if cimg is not None else tint))
+                self.item_img.append(cimg)
                 tgt.append((x, y))
             else:
                 self.bg_items.append((rect, t, tint))
@@ -340,8 +345,11 @@ class AnimationRenderer:
         """写真を読み直さずに、動き方・長さ・fps だけ変えた係を作る（同じ動画サイズに限る）。"""
         if (st.width, st.height, st.tile_level) != (self.st.width, self.st.height, self.st.tile_level):
             raise ValueError("動画サイズ・写真の大きさが違います")
-        return AnimationRenderer(self.layout, self.tiles, self.bg_color, st, self.tile, self.offset, self._cache,
-                                 self.overlay)
+        r = AnimationRenderer(self.layout, self.tiles, self.bg_color, st, self.tile, self.offset, self._cache,
+                              self.overlay, self.cell_images)
+        r.warnings = getattr(self, "warnings", [])
+        r.closeness = getattr(self, "closeness", None)
+        return r
 
     @property
     def frame_count(self) -> int:
@@ -421,7 +429,7 @@ class AnimationRenderer:
             if abs(rot[i]) < 0.5 and abs(w - T) < 0.5 and m < 0.01:
                 # 着地：ぴったりサイズの正方形を整数位置に描く（くっきり）
                 rect = QRectF(round(x), round(y), T, T)
-                painter.drawImage(rect, self.exact[ti])
+                painter.drawImage(rect, self.item_img[i] if self.item_img[i] is not None else self.exact[ti])
                 if tint is not None:
                     painter.fillRect(rect, tint)
             else:
@@ -441,6 +449,11 @@ class AnimationRenderer:
                 painter.drawImage(rect, src_img, QRectF(sx * k, sy * k, sw * k, sh * k))
                 if tint is not None:
                     painter.fillRect(rect, tint)
+                cimg = self.item_img[i]
+                if cimg is not None and m < FIT_FADE:  # 着地の直前に、変形した写真へなめらかに切り替える
+                    painter.setOpacity(float(a) * (1 - m / FIT_FADE))
+                    painter.drawImage(rect, cimg)
+                    painter.setOpacity(float(a))
                 painter.restore()
             if a < 0.999:
                 painter.setOpacity(1.0)
@@ -497,14 +510,18 @@ def build_renderer(text: str, mask_settings_base: text_mask.TextMaskSettings, re
 # --------------------------------------------------------------------------
 # 「写真の大きさ」ごとの、参考画像の短い辺に並べるタイル数（細かい → 特大）
 PHOTO_LEVEL_SHORT = [80, 60, 45, 32]
+FIT_FADE = 0.35   # 着地のどれくらい手前から、変形した写真に切り替え始めるか（mix の値）
 
 
 def build_photo_renderer(main_photo_path: str, records: list[PhotoRecord], st: AnimationSettings,
                          max_uses: int = 5, color_match: int = 70, edge: int = 20,
                          bg_color: tuple[int, int, int] = (30, 26, 46),
                          progress: Callable[[int, int], None] | None = None,
-                         is_cancelled: Callable[[], bool] | None = None) -> AnimationRenderer:
-    """参考画像を動画の中に収まる大きさで置き、その形・色になるように写真を集める。"""
+                         is_cancelled: Callable[[], bool] | None = None, fit: int = 0) -> AnimationRenderer:
+    """参考画像を動画の中に収まる大きさで置き、その形・色になるように写真を集める。
+
+    fit：メイン画像への近さの目標（%）。0 以外なら、写真を升目ごとに変形してメイン画像に合わせる。
+    """
     from . import image_io
     from .color import srgb_to_lab  # noqa: F401  （色の計算は mosaic_engine と共通）
     if not records:
@@ -525,7 +542,7 @@ def build_photo_renderer(main_photo_path: str, records: list[PhotoRecord], st: A
     uses = mosaic_engine._effective_max_uses(n_cells, len(records), max_uses)
     rng = np.random.default_rng(st.seed)
     assign = mosaic_engine.assign_tiles(cell_feats, tile_feats, cols, rows, uses, rng, cancelled=is_cancelled)
-    alpha = 0.55 * (color_match / 100) ** 1.5
+    alpha = 0.0 if fit else 0.55 * (color_match / 100) ** 1.5
     lay = mosaic_engine.TextLayout(
         cols=cols, rows=rows, assign=assign, is_text=np.ones(n_cells, dtype=bool),
         tint_rgb=cell_rgb.astype(np.float32), tint_alpha=np.full(n_cells, alpha, dtype=np.float32),
@@ -534,11 +551,41 @@ def build_photo_renderer(main_photo_path: str, records: list[PhotoRecord], st: A
                   if mosaic_engine._required_uses(n_cells, len(records)) > max_uses else []))
     used = sorted(set(assign.tolist()))
     tiles, _failed = load_fly_images(records, used, tile, st.fly_width, progress, is_cancelled)
-    overlay = None
-    if edge > 0:
-        from PIL import ImageOps
-        ov = ImageOps.fit(main.image, (cols * tile, rows * tile), Image.Resampling.LANCZOS)
-        overlay = (_pil_to_qimage(ov), 0.4 * edge / 100)
-    r = AnimationRenderer(lay, tiles, tuple(bg_color), st, tile, offset, overlay=overlay)
+    from PIL import ImageOps
+    ov = ImageOps.fit(main.image, (cols * tile, rows * tile), Image.Resampling.LANCZOS)
+    overlay = (_pil_to_qimage(ov), 0.4 * edge / 100) if edge > 0 else None
+    cell_images, closeness = None, None
+    if fit:
+        cell_images, closeness = _fitted_cells(lay, tiles, tile, np.asarray(ov, dtype=np.uint8), edge, fit,
+                                               is_cancelled)
+        overlay = None  # 輪郭の強調は、変形した写真の中に含めた
+    r = AnimationRenderer(lay, tiles, tuple(bg_color), st, tile, offset, overlay=overlay, cell_images=cell_images)
     r.warnings = lay.warnings
+    r.closeness = closeness
     return r
+
+
+def _fitted_cells(lay: mosaic_engine.TextLayout, tiles: dict[int, Image.Image], tile: int, target: np.ndarray,
+                  edge: int, fit: int, is_cancelled) -> tuple[dict[int, QImage], float]:
+    """完成のモザイクを静止画と同じ方法で作り、写真をメイン画像に合わせて変形 → 升目ごとの着地画像にする。"""
+    cols, rows = lay.cols, lay.rows
+    squares: dict[int, np.ndarray] = {}
+    for t, im in tiles.items():
+        side = min(im.size)
+        x0, y0 = (im.width - side) // 2, (im.height - side) // 2
+        sq = im.crop((x0, y0, x0 + side, y0 + side))
+        squares[t] = np.asarray(sq if side == tile else _resize(sq, (tile, tile)), dtype=np.uint8)
+    out = np.empty((rows * tile, cols * tile, 3), dtype=np.uint8)
+    for i in range(cols * rows):
+        r, c = divmod(i, cols)
+        t = int(lay.assign[i])
+        out[r * tile:(r + 1) * tile, c * tile:(c + 1) * tile] = squares[t] if t in squares else lay.solid[i]
+    if edge > 0:
+        ea = 0.4 * edge / 100
+        out = (out * (1 - ea) + target * ea).astype(np.uint8)
+    closeness = mosaic_engine.fit_to_target(out, target, tile, fit, is_cancelled)
+    cells: dict[int, QImage] = {}
+    for i in range(cols * rows):
+        r, c = divmod(i, cols)
+        cells[i] = _np_to_qimage(np.ascontiguousarray(out[r * tile:(r + 1) * tile, c * tile:(c + 1) * tile]))
+    return cells, closeness

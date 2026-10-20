@@ -179,6 +179,32 @@ class RenderTest(unittest.TestCase):
         mid = frame_array(r.frame(2))
         self.assertGreater(np.abs(mid - last).mean(), 1.0)   # 途中は動いている
 
+    def test_photo_animation_fit_99_percent(self):
+        """写真モザイクの動画：変形した写真が着地し、最後のコマがメイン画像に 99% 近い。途中は動いている。"""
+        from PIL import ImageOps
+
+        from app import mosaic_engine as me
+        root = Path(self.tmp.name)
+        ref = root / "参考_fit.png"
+        g = np.zeros((400, 600, 3), "uint8")
+        g[..., 0] = np.linspace(0, 255, 600)
+        g[..., 2] = np.linspace(255, 0, 400)[:, None]
+        g[150:250, 200:400] = (250, 230, 40)
+        Image.fromarray(g).save(ref)
+        st = an.AnimationSettings(width=480, height=270, fps=10, duration=1, hold=0.2, preset=3, seed=1,
+                                  tile_level=1, fly_width=60)
+        r = an.build_photo_renderer(str(ref), self.records, st, 5, 70, 20, fit=99)
+        self.assertGreaterEqual(r.closeness, 98.95)
+        last = ve.qimage_to_pil(r.frame(r.frame_count - 1))
+        ox, oy, T = r.offset[0], r.offset[1], r.tile
+        grid = last.crop((ox, oy, ox + r.layout.cols * T, oy + r.layout.rows * T))
+        tgt = ImageOps.fit(Image.open(ref).convert("RGB"), grid.size, Image.Resampling.LANCZOS)
+        self.assertGreaterEqual(me.similarity(np.asarray(grid), np.asarray(tgt)), 98.9)
+        mid = frame_array(r.frame(2))
+        self.assertGreater(np.abs(mid - np.asarray(last, dtype=float)).mean(), 1.0)
+        r2 = r.with_settings(an.AnimationSettings(**{**st.__dict__, "preset": 50}))
+        self.assertLess(np.abs(frame_array(r2.frame(r2.frame_count - 1)) - np.asarray(last, dtype=float)).mean(), 1.0)
+
     def test_export_gif(self):
         path = ve.export_gif(self.r, str(self.out / "アニメ"))
         with Image.open(path) as im:

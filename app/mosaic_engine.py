@@ -9,6 +9,12 @@
        ・すぐ隣（上下左右・斜め）に同じ写真を置かない
   4. 「色の一致度」に応じて、各タイルを升目の色に少しだけ寄せる（元の写真に近づく）
   5. 「輪郭の強調」に応じて、元の写真をうっすら重ねる（顔や形がはっきりする）
+  6. 「メイン画像への近さ」（初期値 99%）がオンのときは、写真を1枚ずつ変形してメイン画像に合わせる
+       ・色と明るさ・コントラストを、その升目のメイン画像に合わせる
+       ・升目の中の明暗（例：左半分が暗い）も、メイン画像と同じになるように整える
+         （写真の細かい模様＝写っている人や景色は残す）
+       ・最後に、全体表示で見たときの近さが目標（99% など）に届くよう、メイン画像を必要なだけ重ねる
+     近さ＝全体表示（長い辺 1,600px）で比べた色の差から計算（100% − 平均の色の差 ÷ 255）
 
 ■ 文字モザイクの作り方
   1. 文字マスク（白黒画像）をタイルの升目に分け、文字が半分以上かかる升目を「文字の升目」にする
@@ -52,6 +58,17 @@ class PhotoMosaicSettings:
     edge: int = 20             # 0〜100：元の写真を重ねる強さ
     border: bool = False
     seed: int = 0
+    fit: int = 99              # 0＝オフ／90〜99：メイン画像への近さの目標（%）。写真を変形して合わせる
+
+
+# 「メイン画像への近さ」の選択肢（値, 表示名）
+FIT_LEVELS: list[tuple[int, str]] = [
+    (99, "99%（写真を変形してメイン画像にそっくり）"),
+    (97, "97%"),
+    (95, "95%（写真の模様がよく見える）"),
+    (90, "90%"),
+    (0, "オフ（写真の色のまま・以前と同じ）"),
+]
 
 
 @dataclass
@@ -287,6 +304,101 @@ def _compose(assign: np.ndarray, cols: int, rows: int, tile_px: int,
     return out
 
 
+# --------------------------------------------------------------------------
+# 写真の変形：メイン画像に合わせる
+# --------------------------------------------------------------------------
+def _lowpass_tiles(a: np.ndarray, k: int) -> np.ndarray:
+    """タイルごとの「大まかな明暗」（k×k の区画の平均をなめらかにつないだもの）。a: [枚数, t, t, 3]"""
+    t = a.shape[1]
+    k = max(1, min(k, t))
+    edges = np.linspace(0, t, k + 1).round().astype(int)
+    s = np.add.reduceat(np.add.reduceat(a, edges[:-1], axis=1), edges[:-1], axis=2)
+    cnt = np.diff(edges).astype(np.float32)
+    pooled = s / (cnt[None, :, None, None] * cnt[None, None, :, None])          # [枚数, k, k, 3]
+    wm = np.zeros((t, k), dtype=np.float32)
+    if k == 1:
+        wm[:, 0] = 1
+    else:
+        centers = (edges[:-1] + edges[1:] - 1) / 2
+        pos = np.arange(t)
+        idx = np.clip(np.searchsorted(centers, pos) - 1, 0, k - 2)
+        w = np.clip((pos - centers[idx]) / (centers[idx + 1] - centers[idx]), 0, 1).astype(np.float32)
+        wm[pos, idx] += 1 - w
+        wm[pos, idx + 1] += w
+    return np.einsum("yk,nklc,xl->nyxc", wm, pooled, wm, optimize=True)
+
+
+def fit_tiles_to_target(tiles: np.ndarray, targets: np.ndarray) -> np.ndarray:
+    """写真（タイル）を、同じ位置のメイン画像に合わせて変形する。どちらも [枚数, t, t, 3]。
+
+    1) 色・明るさ・コントラストをメイン画像の升目に合わせる
+    2) 升目の中の大まかな明暗をメイン画像と同じにする（写真の細かい模様は残す）
+    """
+    P = tiles.astype(np.float32)
+    T = targets.astype(np.float32)
+    mP, mT = P.mean(axis=(1, 2), keepdims=True), T.mean(axis=(1, 2), keepdims=True)
+    sP, sT = P.std(axis=(1, 2), keepdims=True), T.std(axis=(1, 2), keepdims=True)
+    gain = np.clip((sT + 6) / (sP + 6), 0.35, 1.6)   # 平らな升目でも写真の模様が消えすぎないように
+    X = (P - mP) * gain + mT
+    t = P.shape[1]
+    k = 4 if t >= 12 else 2 if t >= 4 else 1
+    X = X - _lowpass_tiles(X, k) + _lowpass_tiles(T, k)
+    return np.clip(X, 0, 255)
+
+
+def _to_tiles(strip: np.ndarray, t: int) -> np.ndarray:
+    """[t, 列数*t, 3] の帯 → [列数, t, t, 3]"""
+    cols = strip.shape[1] // t
+    return strip[:, :cols * t].reshape(t, cols, t, 3).transpose(1, 0, 2, 3)
+
+
+def _from_tiles(tiles: np.ndarray) -> np.ndarray:
+    n, t = tiles.shape[:2]
+    return tiles.transpose(1, 0, 2, 3).reshape(t, n * t, 3)
+
+
+def similarity(img: np.ndarray, target: np.ndarray) -> float:
+    """全体表示（長い辺 1,600px）で比べた近さ（%）。100% − 平均の色の差 ÷ 255。"""
+    a, b = _preview_arrays(img, target)
+    return float(100.0 * (1.0 - np.abs(a - b).mean() / 255.0))
+
+
+def _preview_arrays(img: np.ndarray, target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    h, w = img.shape[:2]
+    k = min(1.0, PREVIEW_SIDE / max(w, h))
+    size = (max(1, round(w * k)), max(1, round(h * k)))
+    a = np.asarray(Image.fromarray(img).resize(size, Image.Resampling.BOX), dtype=np.float32)
+    b = np.asarray(Image.fromarray(target).resize(size, Image.Resampling.BOX), dtype=np.float32)
+    return a, b
+
+
+def fit_to_target(out: np.ndarray, target: np.ndarray, tile_px: int, goal: int,
+                  cancelled: Cancelled | None = None) -> float:
+    """モザイク out（その場で書き換え）を、写真を変形してメイン画像 target に近づける。
+
+    goal：全体表示での近さの目標（%）。戻り値：仕上がりの近さ（%）。
+    """
+    H = out.shape[0] - out.shape[0] % tile_px
+    for y in range(0, H, tile_px):
+        _check(cancelled)
+        a = _to_tiles(out[y:y + tile_px], tile_px)
+        b = _to_tiles(target[y:y + tile_px], tile_px)
+        out[y:y + tile_px, :a.shape[0] * tile_px] = _from_tiles(fit_tiles_to_target(a, b)).round().astype(np.uint8)
+    # 足りない分は、メイン画像を必要なだけ重ねる（重ねる量は計算で決まる：近さは重ねる量に比例して上がる）
+    pa, pb = _preview_arrays(out, target)
+    err = float(np.abs(pa - pb).mean() / 255.0)
+    need = 1.0 - goal / 100.0
+    if err > need > 0 or (goal >= 100 and err > 0):
+        beta = 1.0 - need / err
+        strip = 256
+        for y in range(0, out.shape[0], strip):
+            _check(cancelled)
+            seg = out[y:y + strip].astype(np.float32)
+            seg += (target[y:y + strip].astype(np.float32) - seg) * beta
+            out[y:y + strip] = np.clip(seg.round(), 0, 255).astype(np.uint8)
+    return similarity(out, target)
+
+
 def _draw_borders(out: np.ndarray, cols: int, rows: int, tile_px: int, color=(20, 18, 28)) -> None:
     bw = max(1, tile_px // 25)
     for r in range(rows):
@@ -333,22 +445,32 @@ def generate_photo_mosaic(main_photo_path: str, records: list[PhotoRecord], s: P
     if failed:
         warnings.append(f"{len(failed)}枚の写真が読み込めなかったため、その部分は元の色で塗りました（写真が移動・削除された可能性）。")
 
-    alpha = 0.55 * (s.color_match / 100) ** 1.5
+    fit_on = s.fit > 0
+    alpha = 0.0 if fit_on else 0.55 * (s.color_match / 100) ** 1.5   # 変形するときは、色寄せは変形に含まれる
     tint_alpha = np.full(n_cells, alpha, dtype=np.float32)
     out = _compose(assign, s.cols, s.rows, s.tile_px, tiles, cell_rgb, tint_alpha, cell_rgb,
-                   report, is_cancelled, 600, 300, TOTAL)
+                   report, is_cancelled, 600, 250 if fit_on else 300, TOTAL)
     del tiles
 
+    overlay = None
+    if s.edge > 0 or fit_on:
+        overlay = np.asarray(ImageOps.fit(main.image, (W, H), Image.Resampling.LANCZOS), dtype=np.uint8)
     if s.edge > 0:  # 元の写真を重ねて輪郭をはっきりさせる
         ea = 0.4 * s.edge / 100
-        overlay = np.asarray(ImageOps.fit(main.image, (W, H), Image.Resampling.LANCZOS), dtype=np.uint8)
         strip = 256
         for y in range(0, H, strip):
             _check(is_cancelled)
             seg = out[y:y + strip].astype(np.float32)
             seg = seg * (1 - ea) + overlay[y:y + strip].astype(np.float32) * ea
             out[y:y + strip] = seg.astype(np.uint8)
-        del overlay
+    if fit_on:  # 写真を1枚ずつ変形して、メイン画像に近づける
+        report(860, TOTAL)
+        closeness = fit_to_target(out, overlay, s.tile_px, s.fit, is_cancelled)
+    elif overlay is not None:
+        closeness = similarity(out, overlay)
+    else:
+        closeness = similarity(out, np.asarray(ImageOps.fit(main.image, (W, H), Image.Resampling.LANCZOS)))
+    del overlay
     if s.border:
         _draw_borders(out, s.cols, s.rows, s.tile_px)
     report(980, TOTAL)
@@ -357,6 +479,7 @@ def generate_photo_mosaic(main_photo_path: str, records: list[PhotoRecord], s: P
     uses = np.bincount(assign, minlength=len(records))
     stats = {"出力サイズ": f"{W:,}×{H:,}px", "タイル数": f"{n_cells:,}枚",
              "使った写真": f"{len(used):,}種類", "最大使用回数": f"{int(uses.max())}回",
+             "メイン画像との近さ": f"{closeness:.1f}%（全体表示で比較）",
              "生成時間": f"{time.time() - t0:.1f}秒"}
     settings = {"mode": "photo", "main_photo": main_photo_path, **s.__dict__,
                 "effective_max_uses": max_uses, "tiles": [records[i].path for i in used]}
