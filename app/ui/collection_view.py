@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import QAbstractListModel, QEvent, QModelIndex, QRect, QSettings, QSize, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPen, QPixmap
+from PySide6.QtCore import QAbstractListModel, QEvent, QMimeData, QModelIndex, QRect, QSettings, QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QAction, QColor, QDrag, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QDialog, QMenu, QStyle, QStyledItemDelegate, QDialogButtonBox, QFileDialog, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QListView, QListWidget, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
@@ -55,6 +55,23 @@ class ThumbModel(QAbstractListModel):
             tip = f"{Path(rec.path).name}\n{rec.width:,}×{rec.height:,}\n{rec.path}"
             return tip + (f"\n⚠ {rec.warning}" if rec.warning else "")
         return None
+
+    # ---- ドラッグ（一覧の写真をプレビューへ運んで「参考画像」にする） ----
+    def flags(self, index: QModelIndex):
+        f = super().flags(index)
+        return f | Qt.ItemFlag.ItemIsDragEnabled if index.isValid() else f
+
+    def mimeTypes(self) -> list[str]:
+        return ["text/uri-list"]
+
+    def mimeData(self, indexes) -> QMimeData:
+        md = QMimeData()
+        md.setUrls([QUrl.fromLocalFile(self.collection.records[i.row()].path)
+                    for i in indexes if i.isValid() and i.row() < len(self.collection.records)])
+        return md
+
+    def supportedDragActions(self):
+        return Qt.DropAction.CopyAction
 
     def refresh(self) -> None:
         self.beginResetModel()
@@ -105,8 +122,25 @@ class ThumbDelegate(QStyledItemDelegate):
         return super().editorEvent(event, model, option, index)
 
 
+class ThumbView(QListView):
+    """サムネイル一覧。写真をつかんで動かすと、その1枚をドラッグできる（プレビューで離すと参考画像に）。"""
+
+    def startDrag(self, supported_actions) -> None:
+        idx = self.currentIndex()
+        if not idx.isValid():
+            return
+        md = self.model().mimeData([idx])
+        drag = QDrag(self)
+        drag.setMimeData(md)
+        pm = self.model().data(idx, Qt.ItemDataRole.DecorationRole)
+        if isinstance(pm, QPixmap) and not pm.isNull():
+            drag.setPixmap(pm.scaled(72, 72, Qt.AspectRatioMode.KeepAspectRatio,
+                                     Qt.TransformationMode.SmoothTransformation))
+        drag.exec(Qt.DropAction.CopyAction)
+
+
 def _thumb_view(model: ThumbModel, strip: bool) -> QListView:
-    v = QListView()
+    v = ThumbView()
     v.setModel(model)
     v.setViewMode(QListView.ViewMode.IconMode)
     v.setUniformItemSizes(True)
@@ -116,6 +150,9 @@ def _thumb_view(model: ThumbModel, strip: bool) -> QListView:
     v.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
     v.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     v.setMouseTracking(True)  # マウスを乗せたときに ✕ を出すため
+    v.setDragEnabled(True)    # 写真をつかんでプレビューへ運べる
+    v.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+    v.setDefaultDropAction(Qt.DropAction.CopyAction)
     if strip:
         v.setIconSize(QSize(64, 64))
         v.setGridSize(QSize(72, 72))
@@ -225,6 +262,7 @@ class CollectionDetailDialog(QDialog):
 
 class CollectionPanel(QGroupBox):
     changed = Signal(int)        # 登録枚数が変わった
+    use_as_main = Signal(str)    # この写真を「参考画像（メイン写真）」にしたい
     message = Signal(str, int)   # ステータスバーに出す文（表示ミリ秒）
 
     def __init__(self, settings: QSettings, parent=None):
@@ -285,6 +323,8 @@ class CollectionPanel(QGroupBox):
         self.view.setItemDelegate(ThumbDelegate(self._remove_rows, self.view))
         self.view.selectionModel().selectionChanged.connect(self._on_selection)
         self.view.customContextMenuRequested.connect(self._context_menu)
+        self.view.doubleClicked.connect(lambda idx: self.use_as_main.emit(self.collection.records[idx.row()].path))
+        self.view.setToolTip("写真をつかんで右のプレビューへ運ぶ（またはダブルクリック）と、参考画像（メイン写真）になります")
         act = QAction("選んだ写真を外す", self.view)
         act.setShortcut(QKeySequence.StandardKey.Delete)
         act.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
@@ -421,6 +461,11 @@ class CollectionPanel(QGroupBox):
             self.view.selectionModel().select(idx, self.view.selectionModel().SelectionFlag.ClearAndSelect)
             rows = [idx.row()]
         m = QMenu(self)
+        idx = self.view.indexAt(pos)
+        if idx.isValid():
+            path = self.collection.records[idx.row()].path
+            m.addAction("🖼 この写真を参考画像（メイン写真）にする", lambda: self.use_as_main.emit(path))
+            m.addSeparator()
         m.addAction(f"選んだ写真を外す（{len(rows)}枚）", self.remove_selected)
         m.addAction("すべて選択", self.view.selectAll)
         m.exec(self.view.viewport().mapToGlobal(pos))

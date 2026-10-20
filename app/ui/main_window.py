@@ -182,12 +182,14 @@ class MainWindow(QMainWindow):
         self.collection_panel = CollectionPanel(self.settings)
         self.collection_panel.message.connect(lambda t, ms: self.statusBar().showMessage(t, ms))
         self.collection_panel.changed.connect(lambda n: self._update_generate_enabled())
+        self.collection_panel.use_as_main.connect(self.load_main_photo)
         root.addWidget(self.collection_panel)
 
         # ---- ② 設定 ＋ ③ プレビュー ----
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setChildrenCollapsible(False)
         left = QScrollArea()
+        self.left_scroll = left
         left.setWidgetResizable(True)
         left.setFrameShape(QFrame.Shape.NoFrame)
         left.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -196,6 +198,7 @@ class MainWindow(QMainWindow):
         self.mode_tabs.addTab(self._build_photo_tab(), "写真モザイク")
         self.mode_tabs.addTab(self._build_text_tab(), "文字モザイク")
         self.mode_tabs.currentChanged.connect(self._on_mode_changed)
+        self._build_anim_group()  # 写真モザイク・文字モザイク共通のアニメーション欄（開いているタブの中に置く）
         left.setWidget(self.mode_tabs)
         self.splitter.addWidget(left)
         self.splitter.addWidget(self._build_preview_panel())
@@ -360,8 +363,23 @@ class MainWindow(QMainWindow):
         f4.addRow("タイル1枚の大きさ", self.sp_text_tile)
         v.addWidget(g4)
 
-        # ---- 🎬 文字が集まるアニメーション ----
-        g5 = QGroupBox("🎬 写真が集まって文字になるアニメーション（200種類）")
+
+        self.lbl_text_warn = QLabel("", objectName="warn")
+        self.lbl_text_warn.setWordWrap(True)
+        v.addWidget(self.lbl_text_warn)
+        v.addStretch(1)
+
+        for sig in (self.sl_weight.valueChanged, self.sl_spacing.valueChanged, self.sl_linesp.valueChanged,
+                    self.sp_fontsize.valueChanged, self.chk_autosize.toggled, self.rb_multi.toggled,
+                    self.cb_canvas.currentIndexChanged, self.chk_auto_tiles.toggled,
+                    self.sp_text_cols.valueChanged, self.sp_text_tile.valueChanged,
+                    self.cb_text_level.currentIndexChanged):
+            sig.connect(self._schedule_text_preview)
+        return w
+
+    def _build_anim_group(self) -> QGroupBox:
+        g5 = QGroupBox("🎬 写真が集まるアニメーション（200種類）")
+        self.anim_group = g5
         f5 = QFormLayout(g5)
         row5 = QHBoxLayout()
         self.cb_anim = QComboBox()
@@ -386,7 +404,7 @@ class MainWindow(QMainWindow):
         for name, _pc, _ms in text_mask.TILE_SIZE_LEVELS:
             self.cb_anim_level.addItem(name)
         self.cb_anim_level.setCurrentIndex(2)  # 大きめ
-        self.cb_anim_level.setToolTip("文字を作る写真1枚1枚の大きさです。大きいほど写真がよく見え、細かいほど文字がくっきりします。")
+        self.cb_anim_level.setToolTip("集まった写真1枚1枚の大きさです。大きいほど写真がよく見え、細かいほど文字や参考画像がくっきりします。")
         f5.addRow("写真の大きさ", self.cb_anim_level)
         self.cb_anim_fly = QComboBox()
         for name, val in animation.FLY_WIDTHS:
@@ -416,21 +434,9 @@ class MainWindow(QMainWindow):
         row7.addWidget(self.btn_anim_play)
         row7.addWidget(self.btn_anim_export, 1)
         f5.addRow(row7)
-        f5.addRow(_hint("文字・フォント・色・背景は上の設定がそのまま使われます。\nタイルの細かさは動画の大きさに合わせて自動で決まります。"))
-        v.addWidget(g5)
-
-        self.lbl_text_warn = QLabel("", objectName="warn")
-        self.lbl_text_warn.setWordWrap(True)
-        v.addWidget(self.lbl_text_warn)
-        v.addStretch(1)
-
-        for sig in (self.sl_weight.valueChanged, self.sl_spacing.valueChanged, self.sl_linesp.valueChanged,
-                    self.sp_fontsize.valueChanged, self.chk_autosize.toggled, self.rb_multi.toggled,
-                    self.cb_canvas.currentIndexChanged, self.chk_auto_tiles.toggled,
-                    self.sp_text_cols.valueChanged, self.sp_text_tile.valueChanged,
-                    self.cb_text_level.currentIndexChanged):
-            sig.connect(self._schedule_text_preview)
-        return w
+        self.lbl_anim_hint = _hint("")
+        f5.addRow(self.lbl_anim_hint)
+        return g5
 
     # ---------------- プレビュー ----------------
     def _build_preview_panel(self) -> QWidget:
@@ -708,7 +714,32 @@ class MainWindow(QMainWindow):
     # ==================================================================
     # モード切り替え・設定の保存
     # ==================================================================
+    def _update_anim_hint(self) -> None:
+        if not hasattr(self, "lbl_anim_hint"):
+            return
+        if self.mode_tabs.currentIndex() == 0:
+            self.lbl_anim_hint.setText("写真が飛んできて、参考画像（メイン写真）のモザイクになります。\n"
+                                       "参考画像は動画の中に縦横比のまま収まります。色の一致度・輪郭の強調も反映されます。")
+        else:
+            self.lbl_anim_hint.setText("写真が飛んできて、入力した文字になります。\n"
+                                       "文字・フォント・色・背景は上の設定がそのまま使われます。")
+
+    def _fit_tabs_to_current(self) -> None:
+        """アニメーション欄を、開いているタブの設定のすぐ下へ移す（両モードで同じ欄を使う）。"""
+        if not hasattr(self, "anim_group"):
+            return
+        page = self.mode_tabs.currentWidget()
+        lay = page.layout() if page is not None else None
+        if lay is None or self.anim_group.parentWidget() is page:
+            return
+        lay.insertWidget(max(0, lay.count() - 1), self.anim_group)  # 最後の余白（stretch）の手前
+        self.anim_group.show()
+        if hasattr(self, "left_scroll"):
+            self.left_scroll.verticalScrollBar().setValue(0)
+
     def _on_mode_changed(self, idx: int) -> None:
+        self._fit_tabs_to_current()
+        self._update_anim_hint()
         if hasattr(self, "_anim_timer") and self._anim_timer.isActive():
             self._anim_timer.stop()
             self._set_anim_buttons()
@@ -985,7 +1016,10 @@ class MainWindow(QMainWindow):
                                          fly_width=int(self.cb_anim_fly.currentData()))
         ms = self._text_settings()
         text = self.ed_text.toPlainText()
-        key = (text, w, h, st.tile_level, st.fly_width, ms.font.path if ms.font else "", ms.weight, ms.letter_spacing, ms.line_spacing,
+        mode = self.mode_tabs.currentIndex()
+        photo = (str(self._main_photo.path) if self._main_photo else "", self.sp_uses.value(),
+                 self.sl_match.value(), self.sl_edge.value()) if mode == 0 else None
+        key = (mode, photo, text, w, h, st.tile_level, st.fly_width, ms.font.path if ms.font else "", ms.weight, ms.letter_spacing, ms.line_spacing,
                ms.multiline, ms.font_size, self._text_color.name(), self._bg_color.name(),
                self.rb_bg_photo.isChecked(), len(self.collection_panel.collection),
                tuple(r.sha1 for r in self.collection_panel.collection.records[:50]))
@@ -993,7 +1027,7 @@ class MainWindow(QMainWindow):
 
     def _with_renderer(self, then) -> None:
         """アニメーション係を用意してから then(renderer) を呼ぶ（写真の読み込みは作業係で）。"""
-        reason = self._generate_blocker() if self.mode_tabs.currentIndex() == 1 else ""
+        reason = self._generate_blocker()
         if reason and reason != "生成中です":
             QMessageBox.information(self, "アニメーション", reason)
             return
@@ -1010,7 +1044,15 @@ class MainWindow(QMainWindow):
         self._set_anim_buttons()
         self.statusBar().showMessage("アニメーションの準備をしています（写真を読み込み中）…")
 
+        mode = self.mode_tabs.currentIndex()
+        self._anim_mode = mode
+        main_path = str(self._main_photo.path) if self._main_photo else ""
+        uses, match, edge = self.sp_uses.value(), self.sl_match.value(), self.sl_edge.value()
+
         def build(progress=None, is_cancelled=None):
+            if mode == 0:  # 写真モザイク：写真が集まって参考画像になる
+                return animation.build_photo_renderer(main_path, records, st, uses, match, edge,
+                                                      progress=progress, is_cancelled=is_cancelled)
             return animation.build_renderer(text, ms, records, text_rgb, bg_rgb, bg_photos, st,
                                             progress, is_cancelled)
 
@@ -1061,7 +1103,7 @@ class MainWindow(QMainWindow):
 
     def _anim_tick(self) -> None:
         r = self._anim_renderer
-        if r is None or self.mode_tabs.currentIndex() != 1:
+        if r is None or self.mode_tabs.currentIndex() != getattr(self, "_anim_mode", 1):
             self.stop_animation_preview()
             return
         vp = self.preview.viewport().size()
@@ -1154,16 +1196,19 @@ class MainWindow(QMainWindow):
     def _local_paths(mime) -> list[str]:
         return [u.toLocalFile() for u in mime.urls() if u.isLocalFile()] if mime and mime.hasUrls() else []
 
-    def _drop_goes_to_main_photo(self, widget: QWidget, pos, paths: list[str]) -> bool:
-        """写真モザイクのプレビュー欄に写真を1枚だけ落としたときは、メイン写真にする。"""
-        if self.mode_tabs.currentIndex() != 0 or len(paths) != 1:
+    def _over_preview(self, widget: QWidget, pos) -> bool:
+        vp = self.preview.viewport()
+        return vp.rect().contains(vp.mapFromGlobal(widget.mapToGlobal(pos)))
+
+    def _drop_goes_to_main_photo(self, widget: QWidget, pos, paths: list[str], internal: bool = False) -> bool:
+        """プレビュー欄に写真を1枚だけ落としたときは、参考画像（メイン写真）にする。
+        一覧のサムネイルから運んだときは、文字モザイクの画面からでも写真モザイクに切り替えて設定する。"""
+        if len(paths) != 1 or (self.mode_tabs.currentIndex() != 0 and not internal):
             return False
         p = Path(paths[0])
         if not (p.is_file() and p.suffix.lower() in config.CANDIDATE_EXTENSIONS):
             return False
-        vp = self.preview.viewport()
-        local = vp.mapFromGlobal(widget.mapToGlobal(pos))
-        return vp.rect().contains(local)
+        return self._over_preview(widget, pos)
 
     def eventFilter(self, obj, ev) -> bool:
         if ev.type() not in self._DRAG_TYPES or not isinstance(obj, QWidget) or obj.window() is not self:
@@ -1174,21 +1219,38 @@ class MainWindow(QMainWindow):
         paths = self._local_paths(ev.mimeData())
         if not paths:
             return False  # 写真ファイル以外（文字など）は通常どおり
+        # すでにコレクションに登録済みの写真か（＝サムネイル一覧から運ばれてきた写真）
+        import os
+        known = self.collection_panel.collection.known_paths()
+        internal = all(os.path.normcase(os.path.abspath(x)) in known for x in paths)
         pos = ev.position().toPoint()
-        to_main = self._drop_goes_to_main_photo(obj, pos, paths)
+        to_main = self._drop_goes_to_main_photo(obj, pos, paths, internal)
         if ev.type() in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+            self._drop_leave_timer.stop()
+            if internal and not to_main:
+                # 一覧の写真はプレビューへ運ぶと参考画像になる。ほかの場所では何もしない
+                ev.setDropAction(Qt.DropAction.IgnoreAction)
+                ev.ignore()
+                self.collection_panel.set_drop_highlight(False)
+                self.preview.set_drop_target(False)
+                self.statusBar().showMessage("右のプレビューまで運んで離すと、参考画像（メイン写真）になります")
+                return True
             ev.setDropAction(Qt.DropAction.CopyAction)
             ev.accept()
-            self._drop_leave_timer.stop()
             self.collection_panel.set_drop_highlight(not to_main, len(paths))
-            self.statusBar().showMessage("離すと「メイン写真」になります" if to_main else
+            self.preview.set_drop_target(to_main)
+            self.statusBar().showMessage("離すと「参考画像（メイン写真）」になります" if to_main else
                                          f"離すと、タイル用の写真に追加されます（{len(paths)}個）")
             return True
         # Drop
+        self.collection_panel.set_drop_highlight(False)
+        self.preview.set_drop_target(False)
+        self.statusBar().clearMessage()
+        if internal and not to_main:
+            ev.ignore()
+            return True
         ev.setDropAction(Qt.DropAction.CopyAction)
         ev.accept()
-        self.collection_panel.set_drop_highlight(False)
-        self.statusBar().clearMessage()
         if to_main:
             self.load_main_photo(paths[0])
         else:
@@ -1197,6 +1259,7 @@ class MainWindow(QMainWindow):
 
     def _end_drag_hint(self) -> None:
         self.collection_panel.set_drop_highlight(False)
+        self.preview.set_drop_target(False)
         self.statusBar().clearMessage()
 
     # ==================================================================

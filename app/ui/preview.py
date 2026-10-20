@@ -88,6 +88,13 @@ class PreviewView(QGraphicsView):
             if self._fit:
                 self.fit()
 
+    def set_drop_target(self, on: bool) -> None:
+        """写真を運んでいる間、プレビュー欄を紫の点線で囲んで「ここで離せる」と知らせる。"""
+        if getattr(self, "_drop_on", False) == on:
+            return
+        self._drop_on = on
+        self.viewport().update()
+
     def set_placeholder(self, text: str) -> None:
         self._placeholder = text
         self.viewport().update()
@@ -122,6 +129,18 @@ class PreviewView(QGraphicsView):
             self.fit()
 
     def drawForeground(self, painter: QPainter, rect) -> None:
+        if getattr(self, "_drop_on", False):
+            painter.save()
+            painter.resetTransform()
+            from PySide6.QtGui import QPen
+            pen = QPen(QColor("#B79CFF"), 4, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(QColor(124, 77, 255, 40))
+            painter.drawRoundedRect(self.viewport().rect().adjusted(4, 4, -4, -4), 10, 10)
+            painter.setPen(QColor("white"))
+            painter.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter, "⬇ ここで離すと参考画像（メイン写真）になります")
+            painter.restore()
+            return
         if not self.has_image():
             painter.save()
             painter.resetTransform()

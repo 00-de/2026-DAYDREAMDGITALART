@@ -171,6 +171,48 @@ class GuiTest(unittest.TestCase):
         self.assertTrue(pump(lambda: not panel.is_busy()))
         self.assertEqual(len(panel.collection), n - 4)
 
+    def test_3e_thumbnail_drag_to_preview_sets_reference(self):
+        """一覧の写真はドラッグでき、プレビューに落とすと参考画像（メイン写真）になる。文字モードからでも。"""
+        panel = self.w.collection_panel
+        self.assertTrue(pump(lambda: not panel.is_busy() and len(panel.collection) > 0))
+        idx = panel.model.index(0)
+        self.assertTrue(panel.model.flags(idx) & Qt.ItemFlag.ItemIsDragEnabled)
+        self.assertTrue(panel.view.dragEnabled())
+        md = panel.model.mimeData([idx])
+        path = panel.collection.records[0].path
+        self.assertEqual(md.urls()[0].toLocalFile(), path)
+        # 文字モザイクの画面で、プレビューに落とす
+        self.w.mode_tabs.setCurrentIndex(1)
+        self.w._main_photo = None
+        n = len(panel.collection)
+        self._drop([path], self.w.preview)
+        self.assertTrue(pump(lambda: self.w._main_photo is not None))
+        self.assertEqual(self.w.mode_tabs.currentIndex(), 0, "写真モザイクに切り替わらない")
+        self.assertEqual(str(self.w._main_photo.path), path)
+        self.assertEqual(len(panel.collection), n)
+        # 一覧の写真をプレビュー以外（サムネイル一覧）に落としても何も起きない
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(path)])
+        vp = panel.view.viewport()
+        enter = QDragEnterEvent(vp.rect().center(), Qt.DropAction.CopyAction, mime,
+                                Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(vp, enter)
+        self.assertFalse(enter.isAccepted())
+
+    def test_3f_double_click_and_menu_set_reference(self):
+        from PySide6.QtTest import QTest
+        panel = self.w.collection_panel
+        self.w._main_photo = None
+        path = panel.collection.records[1].path
+        rect = panel.view.visualRect(panel.model.index(1))
+        vp = panel.view.viewport()
+        # Windows と同じ順番：押す → 離す → ダブルクリック
+        QTest.mousePress(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, rect.center())
+        QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, rect.center())
+        QTest.mouseDClick(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, rect.center())
+        self.assertTrue(pump(lambda: self.w._main_photo is not None))
+        self.assertEqual(str(self.w._main_photo.path), path)
+
     def test_4_text_input_limit(self):
         self.w.mode_tabs.setCurrentIndex(1)
         self.w.ed_text.setPlainText("あ" * 45)
@@ -181,6 +223,7 @@ class GuiTest(unittest.TestCase):
     def test_5_generate_photo_mosaic_and_save(self):
         from app import exporter
         self.w.mode_tabs.setCurrentIndex(0)
+        self.w.load_main_photo(str(self.photos / "p3.jpg"))
         self.assertTrue(pump(lambda: self.w._main_photo is not None))
         self.w.sp_tile.setValue(100)   # 2,000px 以上 → プレビュー（1,600px）より大きい
         self.w.sp_cols.setValue(20)
@@ -239,6 +282,28 @@ class GuiTest(unittest.TestCase):
         out.mkdir(exist_ok=True)
         self.w._run_export(got[0], "gif", str(out / "テスト"))
         self.assertTrue(pump(lambda: (out / "テスト.gif").exists(), 60))
+
+    def test_6c_photo_mosaic_animation(self):
+        """写真モザイクでも、写真が集まって参考画像になるアニメーションを再生・書き出しできる。"""
+        self.w.mode_tabs.setCurrentIndex(0)
+        self.w.load_main_photo(str(self.photos / "p5.jpg"))
+        self.assertTrue(pump(lambda: self.w._main_photo is not None and self.w._main_photo.path.name == "p5.jpg"))
+        self.assertIn("参考画像", self.w.lbl_anim_hint.text())
+        self.assertTrue(self.w.anim_group.isVisible())
+        self.w.cb_anim_size.setCurrentIndex(1)       # 720×1280
+        self.w.sp_anim_sec.setValue(2)
+        self.w.sp_anim_hold.setValue(0)
+        self.w.toggle_animation_preview()
+        self.assertTrue(pump(lambda: self.w._anim_timer.isActive(), 60), "写真モザイクでプレビューが始まらない")
+        self.assertTrue(pump(lambda: self.w._anim_frame > 3, 20))
+        self.w.toggle_animation_preview()
+        r = self.w._anim_renderer
+        self.assertIsNone(r.layout.mask_result)        # 写真モザイク用の係
+        self.assertTrue(r.layout.is_text.all())
+        out = Path(self.tmp.name) / "写真アニメ"
+        out.mkdir(exist_ok=True)
+        self.w._run_export(r, "gif", str(out / "参考画像"))
+        self.assertTrue(pump(lambda: (out / "参考画像.gif").exists(), 60))
 
     def test_7_generate_disabled_without_photos(self):
         self.w.collection_panel.clear()

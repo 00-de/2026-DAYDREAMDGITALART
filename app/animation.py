@@ -279,7 +279,8 @@ class AnimationRenderer:
 
     def __init__(self, layout: mosaic_engine.TextLayout, tiles: dict[int, np.ndarray | None],
                  bg_color: tuple[int, int, int], st: AnimationSettings, tile: int | None = None,
-                 offset: tuple[int, int] = (0, 0), _cache: dict | None = None):
+                 offset: tuple[int, int] = (0, 0), _cache: dict | None = None,
+                 overlay: tuple[QImage, float] | None = None):
         """tiles：写真ごとの飛行用画像（元の縦横比の PIL 画像）。tile：動画上の1マスの大きさ（整数px）。"""
         self.st = st
         self.layout, self.tiles, self.bg_color = layout, tiles, tuple(bg_color)
@@ -290,6 +291,7 @@ class AnimationRenderer:
         if tile is None:  # 古い呼び出し方との互換
             tile = max(1, int(min(self.W / cols, self.H / rows)))
         self.tile, self.offset = tile, offset
+        self.overlay = overlay  # 写真モザイク：最後に参考画像をうっすら重ねる（輪郭の強調）
         self.cell_w = self.cell_h = float(tile)
         ox, oy = offset
 
@@ -338,7 +340,8 @@ class AnimationRenderer:
         """写真を読み直さずに、動き方・長さ・fps だけ変えた係を作る（同じ動画サイズに限る）。"""
         if (st.width, st.height, st.tile_level) != (self.st.width, self.st.height, self.st.tile_level):
             raise ValueError("動画サイズ・写真の大きさが違います")
-        return AnimationRenderer(self.layout, self.tiles, self.bg_color, st, self.tile, self.offset, self._cache)
+        return AnimationRenderer(self.layout, self.tiles, self.bg_color, st, self.tile, self.offset, self._cache,
+                                 self.overlay)
 
     @property
     def frame_count(self) -> int:
@@ -441,6 +444,14 @@ class AnimationRenderer:
                 painter.restore()
             if a < 0.999:
                 painter.setOpacity(1.0)
+        if self.overlay is not None:
+            ov, strength = self.overlay
+            oa = float(np.clip((t - 0.7) / 0.3, 0, 1)) * strength
+            if oa > 0.004:
+                painter.setOpacity(oa)
+                ox, oy = self.offset
+                painter.drawImage(QRectF(ox, oy, self.layout.cols * T, self.layout.rows * T), ov)
+                painter.setOpacity(1.0)
         painter.end()
         return img
 
@@ -479,3 +490,55 @@ def build_renderer(text: str, mask_settings_base: text_mask.TextMaskSettings, re
     used = sorted(set(lay.assign[lay.assign >= 0].tolist()))
     tiles, _failed = load_fly_images(records, used, tile, st.fly_width, progress, is_cancelled)
     return AnimationRenderer(lay, tiles, tuple(bg_color), st, tile, offset)
+
+
+# --------------------------------------------------------------------------
+# 写真モザイクの集合アニメーション：写真が飛んできて、参考画像（メイン写真）のモザイクになる
+# --------------------------------------------------------------------------
+# 「写真の大きさ」ごとの、参考画像の短い辺に並べるタイル数（細かい → 特大）
+PHOTO_LEVEL_SHORT = [80, 60, 45, 32]
+
+
+def build_photo_renderer(main_photo_path: str, records: list[PhotoRecord], st: AnimationSettings,
+                         max_uses: int = 5, color_match: int = 70, edge: int = 20,
+                         bg_color: tuple[int, int, int] = (30, 26, 46),
+                         progress: Callable[[int, int], None] | None = None,
+                         is_cancelled: Callable[[], bool] | None = None) -> AnimationRenderer:
+    """参考画像を動画の中に収まる大きさで置き、その形・色になるように写真を集める。"""
+    from . import image_io
+    from .color import srgb_to_lab  # noqa: F401  （色の計算は mosaic_engine と共通）
+    if not records:
+        raise MosaicError("タイル用の写真が登録されていません。", "① 写真コレクションに写真を追加してください。")
+    W, H = st.width, st.height
+    main = image_io.load_image(main_photo_path, max_side=max(W, H))
+    aw, ah = main.image.size
+    k = min(W / aw, H / ah)                      # 動画の中に収まる大きさ（縦横比はそのまま）
+    fw, fh = aw * k, ah * k
+    n_short = PHOTO_LEVEL_SHORT[max(0, min(st.tile_level, len(PHOTO_LEVEL_SHORT) - 1))]
+    tile = max(6, int(min(fw, fh) / n_short))
+    cols, rows = max(1, int(fw // tile)), max(1, int(fh // tile))
+    offset = ((W - cols * tile) // 2, (H - rows * tile) // 2)
+
+    cell_feats, cell_rgb = mosaic_engine._cell_features(main.image, cols, rows)
+    tile_feats = np.array([r.grid_lab for r in records], dtype=np.float32)
+    n_cells = cols * rows
+    uses = mosaic_engine._effective_max_uses(n_cells, len(records), max_uses)
+    rng = np.random.default_rng(st.seed)
+    assign = mosaic_engine.assign_tiles(cell_feats, tile_feats, cols, rows, uses, rng, cancelled=is_cancelled)
+    alpha = 0.55 * (color_match / 100) ** 1.5
+    lay = mosaic_engine.TextLayout(
+        cols=cols, rows=rows, assign=assign, is_text=np.ones(n_cells, dtype=bool),
+        tint_rgb=cell_rgb.astype(np.float32), tint_alpha=np.full(n_cells, alpha, dtype=np.float32),
+        solid=cell_rgb.astype(np.float32), used_kinds=len(set(assign.tolist())), mask_result=None,
+        warnings=([f"写真の枚数に対してタイルが多いため、同じ写真を最大{uses}回使いました。"]
+                  if mosaic_engine._required_uses(n_cells, len(records)) > max_uses else []))
+    used = sorted(set(assign.tolist()))
+    tiles, _failed = load_fly_images(records, used, tile, st.fly_width, progress, is_cancelled)
+    overlay = None
+    if edge > 0:
+        from PIL import ImageOps
+        ov = ImageOps.fit(main.image, (cols * tile, rows * tile), Image.Resampling.LANCZOS)
+        overlay = (_pil_to_qimage(ov), 0.4 * edge / 100)
+    r = AnimationRenderer(lay, tiles, tuple(bg_color), st, tile, offset, overlay=overlay)
+    r.warnings = lay.warnings
+    return r

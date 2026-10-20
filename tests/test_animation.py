@@ -148,6 +148,37 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(k_big, 1.0)
         self.assertLessEqual(k_small, 0.5)
 
+    def test_photo_mosaic_animation_reproduces_reference(self):
+        """写真モザイク：最後のコマで参考画像の色の配置（左が赤・右が青）が再現される。"""
+        ref = Path(self.tmp.name) / "参考.png"
+        im = Image.new("RGB", (400, 300), (230, 30, 30))
+        im.paste((30, 30, 230), (200, 0, 400, 300))
+        im.save(ref)
+        rng = np.random.default_rng(4)
+        tdir = Path(self.tmp.name) / "色タイル"
+        tdir.mkdir(exist_ok=True)
+        for i in range(40):
+            c = tuple(int(v) for v in rng.integers(0, 256, 3))
+            Image.new("RGB", (80, 60), c).save(tdir / f"c{i}.png")
+        for i, c in enumerate([(240, 20, 20), (220, 40, 30), (20, 20, 240), (40, 30, 220)]):
+            Image.new("RGB", (80, 60), c).save(tdir / f"rb{i}.png")
+        cache = col.AnalysisCache(Path(self.tmp.name) / "c2.sqlite")
+        recs = col.analyze_sources([str(tdir)], cache=cache).records
+        cache.close()
+        st = an.AnimationSettings(width=360, height=640, fps=10, duration=1, hold=0.2, preset=7, seed=1,
+                                  tile_level=1, fly_width=60)
+        r = an.build_photo_renderer(str(ref), recs, st, max_uses=50, color_match=0, edge=0)
+        self.assertGreater(r.layout.cols, r.layout.rows)   # 横長の参考画像は横長のまま収まる
+        last = frame_array(r.frame(r.frame_count - 1))
+        ox, oy, T = r.offset[0], r.offset[1], r.tile
+        gw, gh = r.layout.cols * T, r.layout.rows * T
+        left = last[oy:oy + gh, ox:ox + gw // 2].mean(axis=(0, 1))
+        right = last[oy:oy + gh, ox + gw // 2:ox + gw].mean(axis=(0, 1))
+        self.assertGreater(left[0], left[2] + 40)
+        self.assertGreater(right[2], right[0] + 40)
+        mid = frame_array(r.frame(2))
+        self.assertGreater(np.abs(mid - last).mean(), 1.0)   # 途中は動いている
+
     def test_export_gif(self):
         path = ve.export_gif(self.r, str(self.out / "アニメ"))
         with Image.open(path) as im:

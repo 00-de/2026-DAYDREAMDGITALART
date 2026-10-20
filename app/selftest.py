@@ -91,6 +91,10 @@ def run(result_path: str) -> int:
                     r = animation.build_renderer("DD", text_mask.TextMaskSettings(), recs2, (255, 255, 255),
                                                  (20, 20, 40), False, st)
                     path, codec = video_export.export_mp4(r, str(d2 / "a"))
+                    ref = d2 / "ref.png"
+                    Image.new("RGB", (60, 40), (200, 60, 90)).save(ref)
+                    pr = animation.build_photo_renderer(str(ref), recs2, st)
+                    checks["photo_animation"] = pr.frame(pr.frame_count - 1).width() == 180
                     checks["animation_presets"] = len(animation.PRESETS)
                     checks["mp4"] = f"{codec} ({Path(path).stat().st_size} bytes)"
             else:
