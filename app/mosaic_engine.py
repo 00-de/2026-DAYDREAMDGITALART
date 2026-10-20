@@ -62,13 +62,13 @@ class PhotoMosaicSettings:
 
 
 # 「メイン画像への近さ」の選択肢（値, 表示名）
-FIT_LEVELS: list[tuple[int, str]] = [
-    (99, "99%（写真を変形してメイン画像にそっくり）"),
-    (97, "97%"),
-    (95, "95%（写真の模様がよく見える）"),
-    (90, "90%"),
-    (0, "オフ（写真の色のまま・以前と同じ）"),
-]
+# 99%〜90% を 1% きざみで選べる（数字が小さいほど、拡大したときに写真の模様がよく見える）
+_FIT_NOTES = {99: "（写真を変形してメイン画像にそっくり）", 95: "（写真の模様がよく見える）",
+              90: "（写真の模様がいちばんよく見える）"}
+FIT_LEVELS: list[tuple[int, str]] = (
+    [(v, f"{v}%{_FIT_NOTES.get(v, '')}") for v in range(99, 89, -1)]
+    + [(0, "オフ（写真の色のまま・以前と同じ）")]
+)
 
 
 @dataclass
@@ -378,6 +378,7 @@ def fit_to_target(out: np.ndarray, target: np.ndarray, tile_px: int, goal: int,
 
     goal：全体表示での近さの目標（%）。戻り値：仕上がりの近さ（%）。
     """
+    raw = out.copy()   # 変形前（目標より近づきすぎたときに、変形を弱めるため）
     H = out.shape[0] - out.shape[0] % tile_px
     for y in range(0, H, tile_px):
         _check(cancelled)
@@ -388,6 +389,23 @@ def fit_to_target(out: np.ndarray, target: np.ndarray, tile_px: int, goal: int,
     pa, pb = _preview_arrays(out, target)
     err = float(np.abs(pa - pb).mean() / 255.0)
     need = 1.0 - goal / 100.0
+    if err < need:
+        # 変形だけで目標より近くなった → 変形を弱めて、ちょうど目標の近さにする（写真の模様がよく見える）
+        pr, _ = _preview_arrays(raw, target)
+        lo, hi = 0.0, 1.0       # 変形の強さ（全体表示は強さに比例して変わるので、縮小画像で計算できる）
+        for _ in range(20):
+            mid = (lo + hi) / 2
+            e = float(np.abs(pr + (pa - pr) * mid - pb).mean() / 255.0)
+            lo, hi = (lo, mid) if e <= need else (mid, hi)
+        gamma = hi
+        strip = 256
+        for y in range(0, out.shape[0], strip):
+            _check(cancelled)
+            r0 = raw[y:y + strip].astype(np.float32)
+            out[y:y + strip] = np.clip((r0 + (out[y:y + strip] - r0) * gamma).round(), 0, 255).astype(np.uint8)
+        del raw
+        return similarity(out, target)
+    del raw
     if err > need > 0 or (goal >= 100 and err > 0):
         beta = 1.0 - need / err
         strip = 256

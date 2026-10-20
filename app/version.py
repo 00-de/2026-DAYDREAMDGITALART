@@ -8,7 +8,7 @@
 自分のPCでそのまま動かしたときは「開発版」になり、自動更新は動きません。
 """
 
-BASE_VERSION = "0.12"
+BASE_VERSION = "0.13"
 
 try:
     from ._build_info import REPO, VERSION  # type: ignore  # 自動ビルド時に生成される

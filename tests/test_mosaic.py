@@ -78,12 +78,15 @@ class MosaicTest(unittest.TestCase):
         """写真を変形すると、全体表示でメイン画像に 99% 近づく（オフのときより大幅に近い）。"""
         recs, main = self._natural_tiles()
         res = {}
-        for fit in (0, 95, 99):
+        self.assertEqual([v for v, _ in me.FIT_LEVELS], [99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 0])
+        for fit in (0, 90, 93, 95, 98, 99):
             s = me.PhotoMosaicSettings(cols=45, rows=30, tile_px=24, fit=fit, seed=2)
             r = me.generate_photo_mosaic(str(main), recs, s)
             res[fit] = float(r.stats["メイン画像との近さ"].split("%")[0])
         self.assertGreaterEqual(res[99], 98.95, res)
-        self.assertGreaterEqual(res[95], 94.95, res)
+        for fit in (90, 93, 95, 98):   # 1% きざみのどの目標でも、ほぼその数字になる（近づきすぎない）
+            self.assertAlmostEqual(res[fit], fit, delta=0.3, msg=str(res))
+        self.assertLess(res[90], res[99], res)
         self.assertLess(res[0], 95, res)
 
     def test_fit_keeps_photo_texture(self):
