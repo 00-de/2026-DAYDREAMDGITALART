@@ -97,6 +97,10 @@ def run(result_path: str) -> int:
                     checks["photo_animation"] = pr.frame(pr.frame_count - 1).width() == 180
                     checks["animation_presets"] = len(animation.PRESETS)
                     checks["mp4"] = f"{codec} ({Path(path).stat().st_size} bytes)"
+                    # 画質の指定（ビットレート）がこの PC の圧縮部品で効くか：目標に対する実際の大きさの割合
+                    target = video_export.mp4_bitrate(r.W, r.H, st.fps, video_export.DEFAULT_KB_PER_FRAME) / 8 \
+                        * r.frame_count / st.fps
+                    checks["mp4_size_vs_target"] = round(Path(path).stat().st_size / target, 2)
             else:
                 checks["mp4"] = "skipped: no Japanese font"
         except Exception as e:  # MP4 が作れなくてもアプリ自体は使えるので、記録だけする

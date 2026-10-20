@@ -111,13 +111,36 @@ def mp4_codec_name() -> str:
     return ""
 
 
+# 画質（1コマあたりの目安の大きさ・KB）。1920×1080 の動画が基準で、小さい動画はコマの面積に合わせて減らす。
+# 「高画質」は Toshiさんのご要望「1枚あたり 700〜850KB」の真ん中（約780KB）をねらう。
+MP4_QUALITIES: list[tuple[str, str, int]] = [
+    ("high", "高画質（1コマ 約700〜850KB）", 780),
+    ("max", "最高画質（1コマ 約1.2MB・ファイルが大きい）", 1200),
+    ("light", "軽め（1コマ 約250KB・LINEやメールで送る向け）", 250),
+]
+DEFAULT_KB_PER_FRAME = 780
+_BASE_PIXELS = 1920 * 1080
+
+
+def mp4_bitrate(width: int, height: int, fps: int, kb_per_frame: int) -> int:
+    """1コマあたりの目安の大きさ（KB）から、動画のビットレート（1秒あたりのビット数）を求める。"""
+    area = min(1.0, (width * height) / _BASE_PIXELS)
+    return int(kb_per_frame * 1024 * 8 * fps * area)
+
+
 def export_mp4(r: AnimationRenderer, path: str, progress: Progress | None = None,
-               is_cancelled: Cancelled | None = None, timeout_sec: float = 600) -> tuple[str, str]:
-    """MP4 動画を書き出す。戻り値：(保存先, 使った圧縮方式)。"""
+               is_cancelled: Cancelled | None = None, timeout_sec: float = 600,
+               kb_per_frame: int | None = DEFAULT_KB_PER_FRAME) -> tuple[str, str]:
+    """MP4 動画を書き出す。戻り値：(保存先, 使った圧縮方式)。
+
+    kb_per_frame：1コマあたりの目安の大きさ（KB）。None のときは圧縮方式まかせ（以前の動き）。
+    """
     from PySide6.QtMultimedia import (QMediaCaptureSession, QMediaFormat, QMediaRecorder, QVideoFrame,
                                       QVideoFrameFormat, QVideoFrameInput)
     target = Path(path).with_suffix(".mp4")
-    _check_space(target.parent, int(r.W * r.H * 0.15 * r.frame_count))
+    need = (mp4_bitrate(r.W, r.H, r.st.fps, kb_per_frame) / 8 * r.frame_count / r.st.fps if kb_per_frame
+            else r.W * r.H * 0.15 * r.frame_count)
+    _check_space(target.parent, int(need))
     fmt = QMediaFormat(QMediaFormat.FileFormat.MPEG4)
     enc = fmt.supportedVideoCodecs(QMediaFormat.ConversionMode.Encode)
     if QMediaFormat.VideoCodec.H264 in enc:
@@ -141,7 +164,11 @@ def export_mp4(r: AnimationRenderer, path: str, progress: Progress | None = None
     rec.setVideoResolution(QSize(r.W, r.H))
     rec.setVideoFrameRate(r.st.fps)
     rec.setQuality(QMediaRecorder.Quality.VeryHighQuality)
-    rec.setEncodingMode(QMediaRecorder.EncodingMode.ConstantQualityEncoding)
+    if kb_per_frame:  # 決まった大きさ（ビットレート）で圧縮 → 1コマあたりの大きさがそろう
+        rec.setEncodingMode(QMediaRecorder.EncodingMode.ConstantBitRateEncoding)
+        rec.setVideoBitRate(mp4_bitrate(r.W, r.H, r.st.fps, kb_per_frame))
+    else:
+        rec.setEncodingMode(QMediaRecorder.EncodingMode.ConstantQualityEncoding)
     rec.setOutputLocation(QUrl.fromLocalFile(str(tmp)))
 
     n = r.frame_count

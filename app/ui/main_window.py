@@ -1114,13 +1114,15 @@ class MainWindow(QMainWindow):
     def export_animation(self) -> None:
         if self._anim_timer.isActive():
             self.stop_animation_preview()
-        dlg = AnimationExportDialog(self.settings, video_export.mp4_codec_name(), self)
+        kind = "写真アニメ" if self.mode_tabs.currentIndex() == 0 else "文字アニメ"
+        dlg = AnimationExportDialog(self.settings, video_export.mp4_codec_name(), self, kind=kind)
         if dlg.exec() != AnimationExportDialog.DialogCode.Accepted:
             return
-        fmt, path = dlg.result_format, dlg.result_path
-        self._with_renderer(lambda r: self._run_export(r, fmt, path))
+        fmt, path, kb = dlg.result_format, dlg.result_path, dlg.result_kb_per_frame
+        self._with_renderer(lambda r: self._run_export(r, fmt, path, kb))
 
-    def _run_export(self, r: animation.AnimationRenderer, fmt: str, path: str) -> None:
+    def _run_export(self, r: animation.AnimationRenderer, fmt: str, path: str,
+                    kb_per_frame: int = video_export.DEFAULT_KB_PER_FRAME) -> None:
         prog = QProgressDialog("動画を書き出しています…", "中止", 0, 1000, self)
         prog.setWindowTitle("動画の書き出し")
         prog.setWindowModality(Qt.WindowModality.WindowModal)
@@ -1156,12 +1158,25 @@ class MainWindow(QMainWindow):
         secs = r.frame_count / r.st.fps
         if fmt == "mp4":  # 動画機能は画面と同じスレッドで動かす（進み具合は表示される）
             try:
-                out, codec = video_export.export_mp4(r, path, report, lambda: cancelled["v"])
+                try:
+                    out, codec = video_export.export_mp4(r, path, report, lambda: cancelled["v"],
+                                                         kb_per_frame=kb_per_frame)
+                except video_export.ExportCancelled:
+                    raise
+                except MosaicError:
+                    if not kb_per_frame:
+                        raise
+                    # 指定の画質を受け付けない PC では、圧縮方式まかせの画質で作り直す
+                    out, codec = video_export.export_mp4(r, path, report, lambda: cancelled["v"],
+                                                         kb_per_frame=None)
+                    codec += "（指定の画質を使えなかったため、自動の画質で作成）"
             except Exception as e:
                 failed(e)
                 return
-            size = Path(out).stat().st_size / 1e6
+            nbytes = Path(out).stat().st_size
+            size, per = nbytes / 1e6, nbytes / max(1, r.frame_count) / 1024
             finished(f"MP4 動画を書き出しました。\n\n保存先：{out}\n大きさ：{r.W}×{r.H}・{secs:.1f}秒・{size:.1f}MB\n"
+                     f"画質：1コマあたり 約{per:,.0f}KB\n"
                      f"圧縮方式：{codec}\n動き方：{r.preset.name}", str(Path(out).parent))
             return
 

@@ -199,6 +199,41 @@ class RenderTest(unittest.TestCase):
         self.assertIn(codec, ("H.264", "MPEG-4"))
         self.assertFalse(list(self.out.glob(".saving_*")), "一時ファイルが残っている")
 
+    def test_bitrate_matches_700_to_850kb_per_frame(self):
+        """高画質の目安（1920×1080・1コマ 約780KB）→ ビットレートの計算が合っている。小さい動画は面積に合わせて減る。"""
+        self.assertEqual(ve.mp4_bitrate(1920, 1080, 30, 780), 780 * 1024 * 8 * 30)
+        self.assertEqual(ve.mp4_bitrate(1080, 1920, 30, 780), 780 * 1024 * 8 * 30)   # 縦長も同じ
+        self.assertEqual(ve.mp4_bitrate(960, 540, 30, 780), 780 * 1024 * 8 * 30 // 4)
+        self.assertEqual(ve.DEFAULT_KB_PER_FRAME, 780)
+        self.assertEqual(ve.MP4_QUALITIES[0][2], 780)
+
+    def test_export_mp4_full_hd_is_700_to_850kb_per_frame(self):
+        """1920×1080 の MP4 が、1コマあたり 700〜850KB の大きさで書き出される（写真モザイク）。"""
+        if ve.mp4_codec_name() != "MPEG-4":
+            self.skipTest("実際の大きさの確認は MPEG-4 の環境で行う（Windows の H.264 は書き出し後の画面で表示）")
+        root = Path(self.tmp.name)
+        tdir = root / "細かい写真"
+        tdir.mkdir(exist_ok=True)
+        rng = np.random.default_rng(9)
+        for i in range(60):  # 本物の写真のように細かい模様のある写真
+            a = (rng.random((30, 40, 3)) * 255).astype("uint8")
+            Image.fromarray(a).resize((400, 300), Image.Resampling.BICUBIC).save(tdir / f"p{i}.jpg", quality=90)
+        ref = root / "参考_グラデ.png"
+        g = np.zeros((600, 900, 3), "uint8")
+        g[..., 0] = np.linspace(0, 255, 900)
+        g[..., 1] = np.linspace(0, 255, 600)[:, None]
+        Image.fromarray(g).save(ref)
+        cache = col.AnalysisCache(root / "c3.sqlite")
+        recs = col.analyze_sources([str(tdir)], cache=cache).records
+        cache.close()
+        st = an.AnimationSettings(width=1920, height=1080, fps=30, duration=1.5, hold=0.5, preset=0, seed=1,
+                                  tile_level=1, fly_width=100)
+        r = an.build_photo_renderer(str(ref), recs, st, 5, 70, 20)
+        path, _ = ve.export_mp4(r, str(self.out / "高画質"), kb_per_frame=780)
+        per = Path(path).stat().st_size / r.frame_count / 1024
+        self.assertGreaterEqual(per, 700, f"1コマ {per:.0f}KB")
+        self.assertLessEqual(per, 850, f"1コマ {per:.0f}KB")
+
     def test_cancel(self):
         with self.assertRaises(ve.ExportCancelled):
             ve.export_png_sequence(self.r, str(self.out / "中止"), is_cancelled=lambda: True)

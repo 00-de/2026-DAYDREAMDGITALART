@@ -7,13 +7,13 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import (
-    QButtonGroup, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+    QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QRadioButton, QVBoxLayout,
 )
 
 
 class AnimationExportDialog(QDialog):
-    def __init__(self, settings: QSettings, mp4_codec: str, parent=None):
+    def __init__(self, settings: QSettings, mp4_codec: str, parent=None, kind: str = "文字アニメ"):
         super().__init__(parent)
         self.setWindowTitle("アニメーションを書き出す")
         self.setMinimumWidth(560)
@@ -37,6 +37,19 @@ class AnimationExportDialog(QDialog):
             fv.addWidget(rb)
         f.addRow("形式", fv)
 
+        from ..video_export import DEFAULT_KB_PER_FRAME, MP4_QUALITIES
+        self.cb_quality = QComboBox()
+        for key, label, kb in MP4_QUALITIES:
+            self.cb_quality.addItem(label, kb)
+        keys = [k for k, _, _ in MP4_QUALITIES]
+        last_q = settings.value("anim/mp4_quality", "high")
+        self.cb_quality.setCurrentIndex(keys.index(last_q) if last_q in keys else 0)
+        self._quality_keys = keys
+        f.addRow("動画の画質", self.cb_quality)
+        self.rb_mp4.toggled.connect(self.cb_quality.setEnabled)
+        self.cb_quality.setEnabled(self.rb_mp4.isChecked())
+        self.result_kb_per_frame = DEFAULT_KB_PER_FRAME
+
         pictures = Path.home() / "Videos"
         if not pictures.is_dir():
             pictures = Path.home()
@@ -47,7 +60,7 @@ class AnimationExportDialog(QDialog):
         row.addWidget(self.ed_folder, 1)
         row.addWidget(b)
         f.addRow("保存先フォルダー", row)
-        self.ed_name = QLineEdit(f"DayDreamPlus_文字アニメ_{time.strftime('%Y%m%d_%H%M')}")
+        self.ed_name = QLineEdit(f"DayDreamPlus_{kind}_{time.strftime('%Y%m%d_%H%M')}")
         f.addRow("名前", self.ed_name)
         v.addLayout(f)
         self.lbl = QLabel("※ PNG 連番は、この名前のフォルダーを作って 1コマずつ保存します。", objectName="hint")
@@ -80,6 +93,8 @@ class AnimationExportDialog(QDialog):
             if r != QMessageBox.StandardButton.Yes:
                 return
         self.settings.setValue("anim/fmt", fmt)
+        self.settings.setValue("anim/mp4_quality", self._quality_keys[self.cb_quality.currentIndex()])
+        self.result_kb_per_frame = int(self.cb_quality.currentData())
         self.settings.setValue("anim/folder", str(folder))
         self.result_format, self.result_path = fmt, str(target)
         self.accept()
