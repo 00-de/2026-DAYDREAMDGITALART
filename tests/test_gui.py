@@ -27,6 +27,11 @@ QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Y
 QMessageBox.exec = lambda self, *a: POPUPS.append(self.text()) or 0  # 完了のお知らせ等も自動で閉じる
 
 
+def same_file(a, b) -> bool:
+    """同じファイルか（Windows では C:/ と C:\\ 、大文字・小文字の違いを区別しない）。"""
+    return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(os.path.abspath(str(b)))
+
+
 def pump(cond, timeout=30.0):
     t = time.time()
     while time.time() - t < timeout:
@@ -180,7 +185,7 @@ class GuiTest(unittest.TestCase):
         self.assertTrue(panel.view.dragEnabled())
         md = panel.model.mimeData([idx])
         path = panel.collection.records[0].path
-        self.assertEqual(md.urls()[0].toLocalFile(), path)
+        self.assertTrue(same_file(md.urls()[0].toLocalFile(), path))
         # 文字モザイクの画面で、プレビューに落とす
         self.w.mode_tabs.setCurrentIndex(1)
         self.w._main_photo = None
@@ -188,7 +193,7 @@ class GuiTest(unittest.TestCase):
         self._drop([path], self.w.preview)
         self.assertTrue(pump(lambda: self.w._main_photo is not None))
         self.assertEqual(self.w.mode_tabs.currentIndex(), 0, "写真モザイクに切り替わらない")
-        self.assertEqual(str(self.w._main_photo.path), path)
+        self.assertTrue(same_file(self.w._main_photo.path, path))
         self.assertEqual(len(panel.collection), n)
         # 一覧の写真をプレビュー以外（サムネイル一覧）に落としても何も起きない
         mime = QMimeData()
@@ -211,7 +216,7 @@ class GuiTest(unittest.TestCase):
         QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, rect.center())
         QTest.mouseDClick(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, rect.center())
         self.assertTrue(pump(lambda: self.w._main_photo is not None))
-        self.assertEqual(str(self.w._main_photo.path), path)
+        self.assertTrue(same_file(self.w._main_photo.path, path))
 
     def test_4_text_input_limit(self):
         self.w.mode_tabs.setCurrentIndex(1)
